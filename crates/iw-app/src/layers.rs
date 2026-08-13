@@ -387,28 +387,32 @@ pub fn water_flux_color(
 }
 
 /// Everything the beauty palette reads about one cell of a live snapshot.
-pub fn beauty_cell(cells: &ViewCells, sea_level_m: f32, cell: usize) -> BeautyCell {
+pub fn beauty_cell(cells: &ViewCells, sea_level_m: f32, cell: usize, detail: f32) -> BeautyCell {
     BeautyCell {
         elev_m: cells.elevation_m[cell],
         sea_level_m,
         ice_m: cells.ice_thickness_m[cell],
         lake_depth_m: cells.lake_depth_m[cell],
         temperature_c: cells.temperature_c[cell],
+        precip_mm_yr: cells.precip_mm_yr[cell],
+        detail,
         biome: cells.biome[cell],
     }
 }
 
-/// Colour one cell for `layer`.
+/// Colour one cell for `layer`. `detail` is the beauty layer's coherent
+/// albedo noise for this cell (0.0 is a valid neutral for other layers).
 pub fn cell_color(
     layer: Layer,
     cells: &ViewCells,
     sea_level_m: f32,
     cell: usize,
     scales: LayerScales,
+    detail: f32,
 ) -> [u8; 4] {
     let elev = cells.elevation_m[cell];
     match layer {
-        Layer::Beauty => beauty::beauty_color(&beauty_cell(cells, sea_level_m, cell)),
+        Layer::Beauty => beauty::beauty_color(&beauty_cell(cells, sea_level_m, cell, detail)),
         Layer::Elevation => elevation_color(elev, sea_level_m),
         Layer::Biomes => biome_color(cells.biome[cell]),
         Layer::Plates => plate_color(cells.plate_id[cell]),
@@ -429,18 +433,23 @@ pub fn cell_color(
     }
 }
 
-/// Colour every cell of a snapshot for `layer`.
+/// Colour every cell of a snapshot for `layer`. `detail` is the beauty
+/// albedo noise field (pass `&[]` to disable — e.g. for other layers' tests).
 pub fn cell_colors(
     layer: Layer,
     cells: &ViewCells,
     sea_level_m: f32,
     scales: LayerScales,
+    detail: &[f32],
 ) -> Vec<[u8; 4]> {
     use rayon::prelude::*;
     let n = cells.elevation_m.len();
     (0..n)
         .into_par_iter()
-        .map(|i| cell_color(layer, cells, sea_level_m, i, scales))
+        .map(|i| {
+            let d = detail.get(i).copied().unwrap_or(0.0);
+            cell_color(layer, cells, sea_level_m, i, scales, d)
+        })
         .collect()
 }
 
@@ -508,8 +517,8 @@ mod tests {
         let scales = LayerScales::from_cells(&c);
         for layer in Layer::ALL {
             for i in 0..8 {
-                let a = cell_color(layer, &c, 0.0, i, scales);
-                let b = cell_color(layer, &c, 0.0, i, scales);
+                let a = cell_color(layer, &c, 0.0, i, scales, 0.3);
+                let b = cell_color(layer, &c, 0.0, i, scales, 0.3);
                 assert_eq!(a, b, "{layer:?} cell {i} is not deterministic");
                 assert_eq!(a[3], 255, "{layer:?} cell {i} must be opaque");
             }
@@ -695,10 +704,10 @@ mod tests {
             *e = (i as f32 - 32.0) * 200.0;
         }
         let scales = LayerScales::from_cells(&c);
-        let bulk = cell_colors(Layer::Elevation, &c, 0.0, scales);
+        let bulk = cell_colors(Layer::Elevation, &c, 0.0, scales, &[]);
         assert_eq!(bulk.len(), 64);
         for (i, got) in bulk.iter().enumerate() {
-            assert_eq!(*got, cell_color(Layer::Elevation, &c, 0.0, i, scales));
+            assert_eq!(*got, cell_color(Layer::Elevation, &c, 0.0, i, scales, 0.0));
         }
     }
 }

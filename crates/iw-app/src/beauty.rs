@@ -53,6 +53,12 @@ pub const ICE_MARGIN_RGB: [u8; 3] = [0xa4, 0xc2, 0xd8];
 pub const ICE_CORE_RGB: [u8; 3] = [0xf6, 0xfa, 0xff];
 
 // --- land ------------------------------------------------------------------
+//
+// The land palette is CONTINUOUS, not categorical: colour comes from the
+// climate fields (a water-balance vegetation index over temperature and
+// precipitation), with the biome enum contributing only mild tints for a few
+// special covers. Flat per-biome fills read as a posterized vector map; the
+// Blue Marble reads as terrain precisely because every pixel differs.
 
 /// Elevation (m) where bare rock starts to show through the vegetation.
 pub const ROCK_START_M: f32 = 2_200.0;
@@ -60,8 +66,10 @@ pub const ROCK_START_M: f32 = 2_200.0;
 pub const ROCK_FULL_M: f32 = 4_200.0;
 /// How much rock is allowed to take over at [`ROCK_FULL_M`].
 pub const ROCK_MAX_BLEND: f32 = 0.80;
-/// Exposed high-altitude rock.
-pub const ROCK_RGB: [u8; 3] = [0x8c, 0x82, 0x74];
+/// Exposed high-altitude rock, warm (dry) and cold variants.
+pub const ROCK_WARM_RGB: [u8; 3] = [0x96, 0x82, 0x6a];
+/// See [`ROCK_WARM_RGB`].
+pub const ROCK_COLD_RGB: [u8; 3] = [0x84, 0x82, 0x80];
 /// Annual mean temperature (C) at which permanent snow starts to show.
 pub const SNOW_START_C: f32 = -2.0;
 /// Annual mean temperature (C) at which the land is snow covered.
@@ -70,10 +78,35 @@ pub const SNOW_FULL_C: f32 = -9.0;
 pub const SNOW_MAX_BLEND: f32 = 0.85;
 /// Permanent snow (slightly warmer than glacier ice).
 pub const SNOW_RGB: [u8; 3] = [0xef, 0xf3, 0xf6];
-/// Land tint used before the biome process has classified anything.
-pub const RAW_LOW_RGB: [u8; 3] = [0x6b, 0x7a, 0x52];
-/// See [`RAW_LOW_RGB`].
-pub const RAW_HIGH_RGB: [u8; 3] = [0x9c, 0x8f, 0x78];
+/// Bare soil, cold and dry (steppe grey-brown).
+pub const SOIL_COLD_RGB: [u8; 3] = [0x8e, 0x84, 0x70];
+/// Bare soil, warm (sand).
+pub const SOIL_WARM_RGB: [u8; 3] = [0xc6, 0xa6, 0x78];
+/// Bare soil, hot (iron-red desert).
+pub const SOIL_HOT_RGB: [u8; 3] = [0xb0, 0x7a, 0x4a];
+/// Full vegetation, boreal (dark conifer, blue cast).
+pub const VEG_BOREAL_RGB: [u8; 3] = [0x2a, 0x44, 0x30];
+/// Full vegetation, temperate.
+pub const VEG_TEMPERATE_RGB: [u8; 3] = [0x3c, 0x5e, 0x2e];
+/// Full vegetation, tropical.
+pub const VEG_TROPICAL_RGB: [u8; 3] = [0x24, 0x50, 0x22];
+/// Rainforest darkening target (very wet canopy).
+pub const VEG_RAINFOREST_RGB: [u8; 3] = [0x18, 0x3c, 0x1c];
+/// Wetness (precip / potential evapotranspiration) where vegetation starts.
+pub const VEG_START_W: f32 = 0.18;
+/// Wetness where the canopy closes.
+pub const VEG_FULL_W: f32 = 0.95;
+/// Per-cell albedo detail: luminance swing at `detail = ±1`.
+pub const DETAIL_LAND_GAIN: f32 = 0.11;
+/// See [`DETAIL_LAND_GAIN`]; water gets less.
+pub const DETAIL_WATER_GAIN: f32 = 0.045;
+/// Octaves / base frequency (cycles per radius) of the albedo detail field.
+pub const DETAIL_OCTAVES: u32 = 6;
+/// See [`DETAIL_OCTAVES`].
+pub const DETAIL_FREQUENCY: f32 = 9.0;
+/// Extra gain applied to land relief gradients before packing for the shader,
+/// so ranges and valleys read at marble distance. Water keeps a flat surface.
+pub const RELIEF_SHADE_GAIN: f32 = 2.6;
 
 // --- clouds ----------------------------------------------------------------
 
@@ -104,6 +137,10 @@ pub struct BeautyCell {
     pub ice_m: f32,
     pub lake_depth_m: f32,
     pub temperature_c: f32,
+    pub precip_mm_yr: f32,
+    /// Spatially coherent albedo noise in [-1, 1] (see [`detail_field`]);
+    /// history snapshots and tests may leave it 0.
+    pub detail: f32,
     pub biome: Biome,
 }
 
@@ -115,11 +152,25 @@ impl Default for BeautyCell {
             ice_m: 0.0,
             lake_depth_m: 0.0,
             // Neutral: warm enough that nothing gets a snow blend it did not
-            // ask for.
+            // ask for, moist enough that the fallback tint reads vegetated.
             temperature_c: 15.0,
+            precip_mm_yr: 900.0,
+            detail: 0.0,
             biome: Biome::Unclassified,
         }
     }
+}
+
+/// Spatially coherent per-cell albedo noise, deterministic from the planet
+/// seed. Multi-octave, continent-scale down to a few cells — this is what
+/// keeps two cells of identical climate from rendering as one flat fill.
+pub fn detail_field(mesh: &Mesh, seed: u64) -> Vec<f32> {
+    use rayon::prelude::*;
+    let noise = iw_core::noise::Noise3::new(seed ^ 0x42_45_41_55); // "BEAU"
+    mesh.centers
+        .par_iter()
+        .map(|c| noise.fbm(*c * DETAIL_FREQUENCY, DETAIL_OCTAVES, 2.0, 0.55))
+        .collect()
 }
 
 fn lerp(a: [u8; 3], b: [u8; 3], t: f32) -> [u8; 3] {
@@ -166,22 +217,78 @@ pub fn ocean_color(depth_m: f32) -> [u8; 3] {
     }
 }
 
-/// Land colour: biome land cover, with bare rock above the treeline and
-/// permanent snow where the annual mean is far enough below freezing.
+/// Vegetation density in [0, 1] from the water balance: how much of the
+/// potential evapotranspiration the rainfall actually covers.
+pub fn vegetation_index(temperature_c: f32, precip_mm_yr: f32) -> f32 {
+    // Crude Thornthwaite-flavoured PET: ~300 mm/yr at freezing, growing
+    // ~55 mm/yr per degree. Cold places need little rain to be green.
+    let pet = 300.0 + 55.0 * (temperature_c + 5.0).max(0.0);
+    let wetness = precip_mm_yr.max(0.0) / pet.max(1.0);
+    // Frozen ground cannot be forest no matter the moisture.
+    let thaw = smoothstep(-9.0, -1.0, temperature_c);
+    smoothstep(VEG_START_W, VEG_FULL_W, wetness) * thaw
+}
+
+/// Continuous Blue-Marble land colour from the climate fields. The biome enum
+/// only contributes mild tints for covers whose look isn't captured by
+/// temperature and moisture alone (mangrove, flooded grassland).
 pub fn land_color(cell: &BeautyCell) -> [u8; 3] {
     let rel = cell.elev_m - cell.sea_level_m;
-    let base = match cell.biome {
-        // The biome process has not run yet (or the cell is flooded in the
-        // data but dry here): fall back to a height tint so the early globe is
-        // still readable.
-        Biome::Unclassified | Biome::Ocean | Biome::Lake => {
-            lerp(RAW_LOW_RGB, RAW_HIGH_RGB, (rel / 4_000.0).clamp(0.0, 1.0))
-        }
-        b => iw_biomes::biome_color(b),
-    };
+    let t = cell.temperature_c;
+
+    // Bare-ground colour by temperature: steppe grey -> sand -> iron red.
+    let soil_warmth = smoothstep(-4.0, 16.0, t);
+    let soil_heat = smoothstep(18.0, 34.0, t);
+    let soil = lerp(
+        SOIL_COLD_RGB,
+        lerp(SOIL_WARM_RGB, SOIL_HOT_RGB, soil_heat),
+        soil_warmth,
+    );
+
+    // Canopy colour by temperature band, darkening toward rainforest when wet.
+    let veg_zone = lerp(
+        VEG_BOREAL_RGB,
+        lerp(
+            VEG_TEMPERATE_RGB,
+            VEG_TROPICAL_RGB,
+            smoothstep(11.0, 23.0, t),
+        ),
+        smoothstep(-3.0, 11.0, t),
+    );
+    let canopy = lerp(
+        veg_zone,
+        VEG_RAINFOREST_RGB,
+        smoothstep(1_400.0, 3_000.0, cell.precip_mm_yr),
+    );
+
+    let veg = vegetation_index(t, cell.precip_mm_yr);
+    let mut base = lerp(soil, canopy, veg);
+
+    // Categorical hints, kept mild so they never re-posterize the map.
+    match cell.biome {
+        Biome::Mangrove => base = lerp(base, [0x1e, 0x46, 0x3a], 0.5),
+        Biome::FloodedGrassland => base = lerp(base, [0x4a, 0x62, 0x40], 0.4),
+        _ => {}
+    }
+
+    // Bare rock takes over above the treeline (colder rock is greyer), then
+    // permanent snow above that.
+    let rock_rgb = lerp(ROCK_COLD_RGB, ROCK_WARM_RGB, soil_warmth);
     let rock = smoothstep(ROCK_START_M, ROCK_FULL_M, rel) * ROCK_MAX_BLEND;
-    let snow = smoothstep(SNOW_START_C, SNOW_FULL_C, cell.temperature_c) * SNOW_MAX_BLEND;
-    lerp(lerp(base, ROCK_RGB, rock), SNOW_RGB, snow)
+    let snow = smoothstep(SNOW_START_C, SNOW_FULL_C, t) * SNOW_MAX_BLEND;
+    let base = lerp(lerp(base, rock_rgb, rock), SNOW_RGB, snow);
+
+    // Spatial detail: break the remaining flatness with coherent noise.
+    scale_luminance(base, 1.0 + DETAIL_LAND_GAIN * cell.detail)
+}
+
+/// Multiply a colour's luminance, clamped, preserving hue.
+fn scale_luminance(c: [u8; 3], k: f32) -> [u8; 3] {
+    let mut out = [0u8; 3];
+    for i in 0..3 {
+        out[i] = (c[i] as f32 * k).round().clamp(0.0, 255.0) as u8;
+    }
+    out
 }
 
 /// The beauty albedo of one cell: ice, then sea, then lake, then land.
@@ -191,11 +298,15 @@ pub fn land_color(cell: &BeautyCell) -> [u8; 3] {
 pub fn beauty_color(cell: &BeautyCell) -> [u8; 4] {
     if cell.ice_m >= ICE_MIN_M {
         let t = (cell.ice_m / ICE_FULL_M).clamp(0.0, 1.0).sqrt();
-        return rgba(lerp(ICE_MARGIN_RGB, ICE_CORE_RGB, t));
+        let ice = lerp(ICE_MARGIN_RGB, ICE_CORE_RGB, t);
+        return rgba(scale_luminance(ice, 1.0 + DETAIL_WATER_GAIN * cell.detail));
     }
     let rel = cell.elev_m - cell.sea_level_m;
     if rel < 0.0 {
-        return rgba(ocean_color(-rel));
+        return rgba(scale_luminance(
+            ocean_color(-rel),
+            1.0 + DETAIL_WATER_GAIN * cell.detail,
+        ));
     }
     if cell.lake_depth_m >= LAKE_MIN_M {
         let t = (cell.lake_depth_m / LAKE_DEEP_M).clamp(0.0, 1.0).sqrt();
@@ -298,7 +409,10 @@ pub fn shading(
             };
             let kind = surface_kind(&cell);
             let (grad_east, grad_north) = if kind == SurfaceKind::Land {
-                elevation_gradient(mesh, &display, i as u32)
+                // Boosted so ridge-and-valley relief reads at marble distance;
+                // slopes at 100 km cell pitch are optically tiny otherwise.
+                let (ge, gn) = elevation_gradient(mesh, &display, i as u32);
+                (ge * RELIEF_SHADE_GAIN, gn * RELIEF_SHADE_GAIN)
             } else {
                 (0.0, 0.0)
             };
@@ -531,14 +645,71 @@ mod tests {
         });
         assert!(cold.iter().all(|c| *c > 200), "deep cold is snow: {cold:?}");
         assert!(cold[0] > warm[0] && cold[2] > warm[2]);
-        // The blend is continuous: no step at the ramp ends.
-        let just_warm = land_color(&BeautyCell {
-            elev_m: 200.0,
-            temperature_c: SNOW_START_C + 0.01,
-            biome: Biome::Tundra,
+        // The palette is CONTINUOUS in temperature (the whole point of the
+        // climate-driven albedo): adjacent temperatures give near-identical
+        // colours, with no categorical step anywhere on the ramp.
+        for t10 in -250..350 {
+            let t = t10 as f32 / 10.0;
+            let a = land_color(&BeautyCell {
+                elev_m: 200.0,
+                temperature_c: t,
+                biome: Biome::Tundra,
+                ..Default::default()
+            });
+            let b = land_color(&BeautyCell {
+                elev_m: 200.0,
+                temperature_c: t + 0.1,
+                biome: Biome::Tundra,
+                ..Default::default()
+            });
+            for i in 0..3 {
+                // Steepest legitimate ramp (snow + thaw overlapping) moves
+                // ~4/255 per 0.1 C; a categorical step would jump tens.
+                assert!(
+                    (a[i] as i32 - b[i] as i32).abs() <= 5,
+                    "palette step at {t} C: {a:?} vs {b:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn albedo_is_climate_driven_not_posterized() {
+        // Same biome, different climates -> visibly different colours.
+        let dry = land_color(&BeautyCell {
+            temperature_c: 24.0,
+            precip_mm_yr: 150.0,
+            biome: Biome::Desert,
             ..Default::default()
         });
-        assert_eq!(just_warm, warm);
+        let semi = land_color(&BeautyCell {
+            temperature_c: 24.0,
+            precip_mm_yr: 700.0,
+            biome: Biome::Desert,
+            ..Default::default()
+        });
+        assert_ne!(dry, semi, "precipitation must move the colour");
+        // Wet tropics are dark green; hot desert is light warm tan.
+        let jungle = land_color(&BeautyCell {
+            temperature_c: 26.0,
+            precip_mm_yr: 2_800.0,
+            biome: Biome::TropicalMoistBroadleaf,
+            ..Default::default()
+        });
+        assert!(jungle[1] > jungle[0] && jungle[1] > jungle[2], "{jungle:?}");
+        assert!(dry[0] > 150 && dry[0] > dry[2] + 40, "{dry:?}");
+        // Detail noise moves luminance but not by much.
+        let flat = land_color(&BeautyCell {
+            detail: 0.0,
+            ..Default::default()
+        });
+        let bumpy = land_color(&BeautyCell {
+            detail: 1.0,
+            ..Default::default()
+        });
+        assert_ne!(flat, bumpy);
+        let lum = |c: [u8; 3]| c.iter().map(|x| *x as f32).sum::<f32>();
+        assert!((lum(bumpy) - lum(flat)).abs() < lum(flat) * 0.2);
     }
 
     /// A field that varies linearly along one axis must come back out of the

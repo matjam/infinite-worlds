@@ -214,6 +214,8 @@ struct App {
 
     /// Static-terrain fallback for `--test-sphere`.
     static_elevation: Vec<f32>,
+    /// Beauty albedo noise, cached per (seed, cell count).
+    beauty_detail_cache: Option<(u64, usize, Arc<Vec<f32>>)>,
 
     start: Instant,
     last_frame: Instant,
@@ -288,6 +290,7 @@ impl App {
             log: EventLog::default(),
             show_help: false,
             static_elevation: Vec::new(),
+            beauty_detail_cache: None,
             start: now,
             last_frame: now,
             fps_window_start: now,
@@ -593,6 +596,16 @@ impl App {
     fn refresh_cells(&mut self) -> Result<()> {
         let mesh = self.mesh.clone();
         let beauty_on = self.layer == Layer::Beauty;
+        // Albedo noise for the beauty layer, fetched before the renderer
+        // borrow (it caches on &mut self).
+        let detail: Arc<Vec<f32>> = if beauty_on {
+            match self.view.as_ref().map(|v| v.cells.elevation_m.len()) {
+                Some(n) => self.beauty_detail(n),
+                None => Arc::new(Vec::new()),
+            }
+        } else {
+            Arc::new(Vec::new())
+        };
         let Some(renderer) = self.renderer.as_mut() else {
             return Ok(());
         };
@@ -618,8 +631,13 @@ impl App {
             return Ok(());
         }
         if let Some(view) = self.view.as_ref() {
-            let colors =
-                layers::cell_colors(self.layer, &view.cells, view.sea_level_m, self.scales);
+            let colors = layers::cell_colors(
+                self.layer,
+                &view.cells,
+                view.sea_level_m,
+                self.scales,
+                &detail,
+            );
             match (beauty_on, mesh.as_ref()) {
                 (true, Some(mesh)) => {
                     let (display, shade) = beauty::shading(
@@ -643,6 +661,21 @@ impl App {
 
     /// Rebuild the cloud coverage field from the current snapshot and hand it
     /// to the shell. Throttled: see [`CLOUD_REFRESH`].
+    /// Coherent albedo-noise field for the beauty layer, cached per
+    /// (seed, cell count); rebuilt after a regenerate or mesh change.
+    fn beauty_detail(&mut self, n: usize) -> Arc<Vec<f32>> {
+        let seed = self.config.seed;
+        if let Some((s, len, d)) = &self.beauty_detail_cache {
+            if *s == seed && *len == n {
+                return Arc::clone(d);
+            }
+        }
+        let mesh = self.mesh.as_ref().expect("mesh set before colouring");
+        let d = Arc::new(beauty::detail_field(mesh, seed));
+        self.beauty_detail_cache = Some((seed, n, Arc::clone(&d)));
+        d
+    }
+
     fn refresh_clouds(&mut self, force: bool) -> Result<()> {
         if !self.clouds {
             return Ok(());
