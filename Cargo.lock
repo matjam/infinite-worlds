@@ -1290,7 +1290,9 @@ name = "iw-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "clap",
  "env_logger",
+ "glam",
  "iw-core",
  "iw-mesh",
  "iw-render-vulkan",
@@ -1315,7 +1317,6 @@ dependencies = [
  "glam",
  "iw-core",
  "iw-mesh",
- "log",
  "rayon",
 ]
 
@@ -1351,6 +1352,8 @@ dependencies = [
  "iw-core",
  "iw-mesh",
  "log",
+ "rand",
+ "rand_pcg",
  "rayon",
 ]
 

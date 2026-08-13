@@ -10,3 +10,12 @@ iw-mesh.workspace = true
 glam.workspace = true
 anyhow.workspace = true
 log.workspace = true
+ash = "0.38.0"
+ash-window = "0.13.0"
+raw-window-handle = "0.6.2"
+gpu-allocator = "0.28.0"
+winit = "0.30.13"
+egui = "0.36.1"
+egui-winit = "0.36.1"
+bytemuck = "1.25.2"
+egui-ash-renderer = { version = "0.13.0", features = ["gpu-allocator"] }
