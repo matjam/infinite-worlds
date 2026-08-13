@@ -27,6 +27,7 @@
 use glam::{DVec3, Vec3};
 use rayon::prelude::*;
 
+pub mod hull;
 mod icosa;
 mod subdiv;
 
