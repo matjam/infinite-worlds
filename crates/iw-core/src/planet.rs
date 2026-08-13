@@ -32,6 +32,25 @@ impl Plate {
     }
 }
 
+/// Per-cell tectonic state bits, rewritten by tectonics each step and consumed
+/// by geology (igneous emplacement, metamorphism bonuses) and the renderer.
+pub mod cell_flags {
+    /// Oceanic cell currently being consumed at a convergent boundary.
+    pub const SUBDUCTING: u8 = 1 << 0;
+    /// Volcanic arc cell (overriding side of a subduction zone).
+    pub const ARC: u8 = 1 << 1;
+    /// Active continent-continent collision zone.
+    pub const COLLISION: u8 = 1 << 2;
+    /// Active rift / spreading ridge.
+    pub const RIFT: u8 = 1 << 3;
+    /// Currently over a mantle plume.
+    pub const HOTSPOT: u8 = 1 << 4;
+    /// Transform boundary cell.
+    pub const TRANSFORM: u8 = 1 << 5;
+    /// Ancient collision seam (weak zone; rifts prefer to nucleate here).
+    pub const SUTURE: u8 = 1 << 6;
+}
+
 /// A fixed mantle plume (DESIGN.md §5).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Hotspot {
@@ -81,6 +100,8 @@ pub struct Planet {
     /// Depth of standing water above ground for lake cells (0 elsewhere).
     pub lake_depth_m: Vec<f32>,
     pub biome: Vec<Biome>,
+    /// Bitwise OR of [`cell_flags`] constants; tectonics rewrites each step.
+    pub tectonic_flags: Vec<u8>,
     pub columns: StrataColumns,
 
     // --- entities ---
@@ -110,6 +131,7 @@ impl Planet {
             water_flux_m3_yr: vec![0.0; n_cells],
             lake_depth_m: vec![0.0; n_cells],
             biome: vec![Biome::Unclassified; n_cells],
+            tectonic_flags: vec![0; n_cells],
             columns: StrataColumns::new(n_cells),
             plates: Vec::new(),
             hotspots: Vec::new(),

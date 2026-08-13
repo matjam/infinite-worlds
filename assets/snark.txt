@@ -1,0 +1,99 @@
+# Progress narration pool for Infinite Worlds.
+#
+# Format: `[section]` starts a section; every non-empty, non-comment line after it
+# is one narration line. Sections in use: crust, drift, refine, recent, generic.
+# `generic` is mixed into every phase. Blank lines and `#` comments are ignored.
+# Adding jokes here never requires touching code.
+
+[crust]
+Whisking the mantle to soft peaks
+Seeding cratons at socially acceptable distances
+Cooling the magma ocean to room temperature
+Deciding which basalt gets to be a continent
+Convincing continents to commit
+Welding cratons; please do not look at the arc flash
+Filing greenstone belts under "seams, decorative"
+Granting the first rocks tenure
+Setting crust thickness to a comfortable forty kilometres
+Arguing with the geotherm
+Nucleating shields, buffing to a dull Archean shine
+Separating felsic from mafic by hand
+Aging zircons for flavour
+Skimming scum off the proto-ocean
+Establishing which way is down
+
+[drift]
+Negotiating with the mantle
+Letting the slab pull its weight
+Applying orogeny liberally
+Subducting the evidence
+Opening one ocean, closing another, breaking even
+Ridge-pushing responsibly
+Rifting along the dotted line
+Filing dissolution paperwork for the supercontinent
+Aged basalt: subsiding as designed
+Delegating to the asthenosphere
+Standing up an island arc, permit pending
+Measuring plate speed in fingernails per year
+Rotating Euler poles until something interesting happens
+Introducing two continents that will not get along
+Retiring old seafloor at the trench
+Percolating plutons
+Thickening crust until the paperwork clears seventy kilometres
+Handing the hotspot a fresh plate to write on
+
+[refine]
+Un-flooding Kansas
+Rounding off the mountains, only a little
+Teaching rivers to find the sea
+Draining the lakes that were, frankly, a mistake
+Applying rain shadow where the brochure promised sun
+Sorting sediment by grain size and personal ambition
+Balancing the isostasy ledger to the nearest metre
+Depositing shale, sincerely
+Weathering feldspar into an apology
+Consulting the hypsometric curve
+Calibrating sea level to the manufacturer's specification
+Bevelling a mountain range for accessibility
+Promoting shale to slate, slate to schist, schist to gneiss
+Auditing the continental shelf
+Encouraging limestone to form somewhere warm and quiet
+Letting the orogeny cool off before anyone gets hurt
+
+[recent]
+Advancing the ice sheets; retreating the ice sheets; repeat as required
+Carving fjords to specification
+Overdeepening a valley for dramatic effect
+Bulldozing moraines into position
+Building a delta one flood at a time
+Dropping sea level; apologising to the shelf
+Growing dunes downwind of nothing much
+Processing an isostatic rebound claim
+Scattering erratics tastefully
+Freezing the poles, thawing the poles, freezing the poles
+Braiding an outwash plain
+Rerouting a river through the neighbour's valley
+Depositing loess, gently
+Plucking bedrock, leaving striations for the tourists
+Filling the kettle holes
+Grinding rock flour, sifting twice
+
+[generic]
+Reticulating splines
+Recalibrating the geoid
+Consulting the Department of Deep Time
+Rounding continents to the nearest cell
+Dividing by the mantle
+Aligning magnetic stripes
+Auditing the mass ledger; no rock has been invented
+Bribing the RNG for a nicer coastline
+Compressing four hundred million years into one progress bar
+Normalising the normals
+Blaming the previous phase
+Rehydrating the oceans
+Adjusting the schedule for continental drift
+Filing with the International Commission on Stratigraphy
+Simulating patience
+Pretending the core is someone else's problem
+Rendering geology at one frame per million years
+Checking that the poles are still where we left them

@@ -23,6 +23,8 @@ pub struct ViewCells {
     pub top_rock: Vec<Option<RockType>>,
     /// Plate surface velocity per cell, m/yr (for the plate arrows layer).
     pub plate_velocity_m_yr: Vec<Vec3>,
+    /// Bitwise OR of [`crate::planet::cell_flags`] constants.
+    pub tectonic_flags: Vec<u8>,
 }
 
 /// A consistent, cheap-to-clone snapshot of the planet for rendering and
@@ -70,6 +72,7 @@ impl PlanetView {
                 lake_depth_m: planet.lake_depth_m.clone(),
                 top_rock,
                 plate_velocity_m_yr,
+                tectonic_flags: planet.tectonic_flags.clone(),
             }),
         }
     }
