@@ -414,9 +414,21 @@ pub fn shading(
 ) -> (Vec<f32>, Vec<CellShade>) {
     use rayon::prelude::*;
     let n = elev_m.len();
-    let display: Vec<f32> = elev_m
-        .par_iter()
-        .map(|e| display_elevation(*e, sea_level_m))
+    // Water renders at its SURFACE: the sea at sea level, a lake at bed
+    // elevation + depth. The hydrology fills each basin to one spill level,
+    // so adjacent lake cells share a surface — displacing them at their own
+    // bed heights made every lake a stack of tilted plates under vertical
+    // exaggeration.
+    let display: Vec<f32> = (0..n)
+        .into_par_iter()
+        .map(|i| {
+            let lake = lake_depth_m.get(i).copied().unwrap_or(0.0);
+            if lake > 0.0 {
+                elev_m[i] + lake
+            } else {
+                display_elevation(elev_m[i], sea_level_m)
+            }
+        })
         .collect();
     let shade = (0..n)
         .into_par_iter()

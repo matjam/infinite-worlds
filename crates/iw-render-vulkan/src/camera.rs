@@ -79,6 +79,12 @@ impl MoveInput {
 pub struct Camera {
     /// Unit direction of the point the camera is over.
     pub focus: Vec3,
+    /// Persistent screen-up direction on the sphere: a unit tangent at
+    /// `focus`, parallel-transported as the focus moves. This is the frame
+    /// WASD and the view are built from — NOT geographic north, so crossing
+    /// a pole is just more terrain sliding by instead of a singular spin,
+    /// and "forward" is wherever the camera is currently pointed.
+    pub heading: Vec3,
     /// Height above the reference sphere, km.
     pub altitude_km: f32,
     /// Free-look yaw offset (radians, about the local up).
@@ -103,6 +109,7 @@ impl Default for Camera {
     fn default() -> Self {
         Camera {
             focus: Vec3::new(1.0, 0.0, 0.0),
+            heading: Vec3::Z,
             altitude_km: 18_000.0,
             yaw_rad: 0.0,
             pitch_rad: 0.0,
@@ -182,12 +189,62 @@ impl Camera {
         self.focus.normalize() * self.radius_km()
     }
 
-    /// Camera basis (forward, up) including free-look offsets. At zero offsets
-    /// the camera looks straight down with north up-screen and east right.
+    /// The carried heading, re-orthogonalised against the current focus (the
+    /// two drift apart by float error as the frame is transported).
+    fn heading_tangent(&self) -> Vec3 {
+        let up = self.focus.normalize();
+        let h = self.heading - up * self.heading.dot(up);
+        if h.length_squared() < 1e-12 {
+            // Degenerate (bad deserialise / teleport): fall back to north.
+            let (_, north) = east_north(up);
+            north
+        } else {
+            h.normalize()
+        }
+    }
+
+    /// Move the focus by `step` radians in the LOOK frame — x along the
+    /// camera's right, y along wherever it is pointed (carried heading plus
+    /// free-look yaw) — then parallel-transport the heading through the same
+    /// rotation so the frame travels with the camera. This is what makes W
+    /// "forward as seen" and keeps a pole crossing from spinning the view.
+    pub fn pan_look(&mut self, step: Vec2) {
+        let angle = step.length();
+        if angle <= 0.0 {
+            return;
+        }
+        let up = self.focus.normalize();
+        let base = self.heading_tangent();
+        let right0 = base.cross(up).normalize();
+        let fwd = base * self.yaw_rad.cos() + right0 * self.yaw_rad.sin();
+        let right = fwd.cross(up).normalize();
+        let tangent = right * step.x + fwd * step.y;
+        let old = self.focus;
+        self.focus = great_circle_step(self.focus, tangent, angle);
+        let axis = old.cross(self.focus);
+        if axis.length_squared() > 1e-18 {
+            let a = old.dot(self.focus).clamp(-1.0, 1.0).acos();
+            self.heading = glam::Quat::from_axis_angle(axis.normalize(), a) * self.heading;
+        }
+        self.heading = self.heading_tangent();
+    }
+
+    /// Point the carried frame back at geographic north (used after a
+    /// teleport, where transporting the old frame would be meaningless).
+    pub fn reset_heading_north(&mut self) {
+        let (_, north) = east_north(self.focus.normalize());
+        self.heading = north;
+    }
+
+    /// Camera basis (forward, up) including free-look offsets. At zero
+    /// offsets the camera looks straight down with the carried heading
+    /// up-screen — the frame travels with the camera instead of being
+    /// re-derived from the poles.
     pub fn orientation(&self) -> (Vec3, Vec3) {
         let up = self.focus.normalize();
-        let (east, north) = east_north(up);
-        let heading = north * self.yaw_rad.cos() + east * self.yaw_rad.sin();
+        let base = self.heading_tangent();
+        let right = base.cross(up).normalize();
+        let heading = base * self.yaw_rad.cos() + right * self.yaw_rad.sin();
         let (sp, cp) = self.pitch_rad.sin_cos();
         let forward = (-up * cp + heading * sp).normalize();
         let cam_up = (up * sp + heading * cp).normalize();
@@ -303,9 +360,7 @@ impl Camera {
 
             let step = self.angular_velocity * dt;
             if step.length_squared() > 0.0 {
-                let (east, north) = east_north(self.focus);
-                let tangent = east * step.x + north * step.y;
-                self.focus = great_circle_step(self.focus, tangent, step.length());
+                self.pan_look(step);
             }
         }
 
@@ -644,5 +699,73 @@ mod tests {
             let w = wrap_pi(a);
             assert!((-PI..PI).contains(&w), "{a} -> {w}");
         }
+    }
+
+    /// With the camera yawed 90 deg, "forward" (W) must move the focus along
+    /// the LOOK direction — east — not geographic north.
+    #[test]
+    fn wasd_follows_the_look_direction() {
+        let mut cam = Camera {
+            focus: EQUATOR,
+            altitude_km: 500.0,
+            yaw_rad: std::f32::consts::FRAC_PI_2,
+            ..Camera::default()
+        };
+        for _ in 0..30 {
+            cam.update(held(1.0, 0.0), 0.05);
+        }
+        // At (1,0,0) with heading north (+z), yaw +90 deg points east (+y).
+        assert!(
+            cam.focus.y > 0.05,
+            "yawed forward motion must go east, focus {}",
+            cam.focus
+        );
+        assert!(
+            cam.focus.z.abs() < cam.focus.y * 0.2,
+            "should not drift toward the pole: {}",
+            cam.focus
+        );
+    }
+
+    /// Flying straight over the pole must come out the other side still
+    /// moving along the same great circle (the carried frame flips with the
+    /// camera), not orbit the pole or snap the view.
+    #[test]
+    fn pole_crossing_is_smooth() {
+        let mut cam = Camera {
+            focus: Vec3::new(1.0, 0.0, 0.0),
+            altitude_km: 20_000.0,
+            ..Camera::default()
+        };
+        let mut max_step = 0.0f32;
+        let mut prev = cam.focus;
+        let mut crossed = false;
+        for _ in 0..4000 {
+            cam.update(held(1.0, 0.0), 0.05);
+            max_step = max_step.max(prev.angle_between(cam.focus));
+            if cam.focus.z < 0.99 && prev.z >= 0.99 {
+                crossed = true;
+            }
+            prev = cam.focus;
+            if cam.focus.x < -0.9 {
+                break;
+            }
+        }
+        let _ = crossed;
+        // The path stays on the x-z great circle (y ~ 0 throughout) and
+        // reaches the far side.
+        assert!(
+            cam.focus.x < -0.5,
+            "should have flown over the pole to the far hemisphere, focus {}",
+            cam.focus
+        );
+        assert!(
+            cam.focus.y.abs() < 0.05,
+            "great-circle flight must not deflect sideways at the pole: {}",
+            cam.focus
+        );
+        // The heading stayed a healthy tangent the whole way.
+        assert!(cam.heading.is_finite());
+        assert!((cam.heading.length() - 1.0).abs() < 1e-3);
     }
 }

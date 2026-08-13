@@ -263,6 +263,7 @@ impl App {
             let lat = args.lat_deg.unwrap_or(0.0).clamp(-89.0, 89.0).to_radians();
             let lon = args.lon_deg.unwrap_or(0.0).to_radians();
             camera.focus = iw_render_vulkan::mercator::dir_from_latlon(lat, lon);
+            camera.reset_heading_north();
             camera.mercator_center = Vec2::new(lon, iw_render_vulkan::mercator::mercator_y(lat));
         }
         if args.mercator {
@@ -867,6 +868,7 @@ impl App {
                     iw_render_vulkan::mercator::inverse_mercator_y(self.camera.mercator_center.y);
                 self.camera.focus =
                     iw_render_vulkan::mercator::dir_from_latlon(lat, self.camera.mercator_center.x);
+                self.camera.reset_heading_north();
                 ViewMode::Globe
             }
         };
@@ -906,16 +908,9 @@ impl App {
                 ViewMode::Globe => {
                     let scale =
                         (self.camera.altitude_km / EARTH_RADIUS_KM).clamp(0.01, 2.0) * 0.004;
-                    let (east, north) = iw_render_vulkan::camera::east_north(self.camera.focus);
-                    let tangent = east * (-dx * scale) + north * (dy * scale);
-                    let angle = tangent.length();
-                    if angle > 0.0 {
-                        self.camera.focus = iw_render_vulkan::camera::great_circle_step(
-                            self.camera.focus,
-                            tangent,
-                            angle,
-                        );
-                    }
+                    // Screen-relative drag: terrain follows the cursor in the
+                    // LOOK frame, whatever way the camera is turned.
+                    self.camera.pan_look(Vec2::new(-dx * scale, dy * scale));
                 }
                 ViewMode::Mercator => {
                     let per_px =

@@ -82,9 +82,11 @@ void main() {
             albedo = SAND_ALBEDO;
             water = false;
         }
-        // A pale band right at the interface reads as surf and wet sand.
+        // A pale band right at the interface reads as surf and wet sand —
+        // kept subtle on lakes, whose calm shores have no surf line.
         float foam = 1.0 - smoothstep(0.0, FOAM_BAND, abs(crinkled));
-        albedo = mix(albedo, FOAM_ALBEDO, foam * 0.4);
+        float surf = (lake_frag || v_landlake.y > 0.2) ? 0.18 : 0.4;
+        albedo = mix(albedo, FOAM_ALBEDO, foam * surf);
     }
 
     // --- Sub-cell relief detail: hills as normal perturbation (land only).
