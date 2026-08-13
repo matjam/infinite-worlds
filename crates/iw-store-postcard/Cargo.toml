@@ -6,9 +6,11 @@ license.workspace = true
 
 [dependencies]
 iw-core.workspace = true
-iw-mesh.workspace = true
 serde.workspace = true
 postcard.workspace = true
 zstd.workspace = true
 anyhow.workspace = true
-log.workspace = true
+
+[dev-dependencies]
+glam.workspace = true
+tempfile = "3"

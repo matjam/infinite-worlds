@@ -10,3 +10,7 @@ iw-mesh.workspace = true
 image.workspace = true
 anyhow.workspace = true
 glam.workspace = true
+rayon.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

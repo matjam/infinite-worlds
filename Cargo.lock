@@ -1305,6 +1305,7 @@ name = "iw-biomes"
 version = "0.1.0"
 dependencies = [
  "glam",
+ "iw-climate",
  "iw-core",
  "iw-mesh",
  "rayon",
@@ -1342,6 +1343,8 @@ dependencies = [
  "image",
  "iw-core",
  "iw-mesh",
+ "rayon",
+ "tempfile",
 ]
 
 [[package]]
@@ -1375,7 +1378,9 @@ dependencies = [
  "iw-surface",
  "iw-tectonics",
  "log",
+ "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -1429,11 +1434,11 @@ name = "iw-store-postcard"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "glam",
  "iw-core",
- "iw-mesh",
- "log",
  "postcard",
  "serde",
+ "tempfile",
  "zstd",
 ]
 
