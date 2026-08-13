@@ -275,6 +275,29 @@ pub(crate) fn update(planet: &mut Planet, mesh: &Mesh, cache: &MeshCache) {
         evap_total += evap[i] as f64 * mesh.areas_km2[i] as f64;
         rain_total += rain_vol[i] as f64;
     }
+
+    // Diagnostics for calibration runs (IW_CLIMATE_DIAG=1): where did the
+    // water go? `airborne` is the injected volume still in flight when the
+    // sweeps ran out — it is discarded and compensated by the rescale below,
+    // so a large value means the rescale is redistributing rain toward
+    // wherever it fell easily (oceans/coasts) at the interiors' expense.
+    if std::env::var_os("IW_CLIMATE_DIAG").is_some() {
+        let mut airborne = 0.0f64;
+        let mut land_rain = 0.0f64;
+        for i in 0..n {
+            airborne += q[i] as f64;
+            if planet.elevation_m[i] >= sea {
+                land_rain += rain_vol[i] as f64;
+            }
+        }
+        eprintln!(
+            "climate-diag: sweeps {} | airborne {:.1}% | land rain share {:.1}% | rescale {:.3}",
+            sweeps,
+            100.0 * airborne / evap_total.max(1.0),
+            100.0 * land_rain / rain_total.max(1.0),
+            evap_total / rain_total.max(1.0),
+        );
+    }
     let scale = if rain_total > 0.0 {
         (evap_total / rain_total) as f32
     } else {

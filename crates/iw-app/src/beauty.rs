@@ -97,9 +97,14 @@ pub const VEG_TROPICAL_RGB: [u8; 3] = [0x24, 0x50, 0x22];
 /// Rainforest darkening target (very wet canopy).
 pub const VEG_RAINFOREST_RGB: [u8; 3] = [0x18, 0x3c, 0x1c];
 /// Wetness (precip / potential evapotranspiration) where vegetation starts.
-pub const VEG_START_W: f32 = 0.18;
+pub const VEG_START_W: f32 = 0.15;
 /// Wetness where the canopy closes.
-pub const VEG_FULL_W: f32 = 0.95;
+///
+/// Calibration: Earth's temperate forests close their canopy around P/PET
+/// ~0.7 (steppe sits near 0.35). At 0.95 a P=600 mm/yr temperate cell drew
+/// ~20% vegetation and whole continents that should read forest-green from
+/// orbit rendered tan.
+pub const VEG_FULL_W: f32 = 0.70;
 /// Per-cell albedo detail: luminance swing at `detail = ±1`.
 pub const DETAIL_LAND_GAIN: f32 = 0.11;
 /// See [`DETAIL_LAND_GAIN`]; water gets less.
@@ -230,9 +235,11 @@ pub fn ocean_color(depth_m: f32) -> [u8; 3] {
 /// Vegetation density in [0, 1] from the water balance: how much of the
 /// potential evapotranspiration the rainfall actually covers.
 pub fn vegetation_index(temperature_c: f32, precip_mm_yr: f32) -> f32 {
-    // Crude Thornthwaite-flavoured PET: ~300 mm/yr at freezing, growing
-    // ~55 mm/yr per degree. Cold places need little rain to be green.
-    let pet = 300.0 + 55.0 * (temperature_c + 5.0).max(0.0);
+    // Crude Thornthwaite-flavoured PET: ~250 mm/yr at freezing, growing
+    // ~40 mm/yr per degree (55 was ~40% above the Thornthwaite curve at
+    // temperate values — 1400 mm/yr at 15 C against ~1000 observed — which
+    // starved the whole albedo of green). Cold places need little rain.
+    let pet = 250.0 + 40.0 * (temperature_c + 5.0).max(0.0);
     let wetness = precip_mm_yr.max(0.0) / pet.max(1.0);
     // Frozen ground cannot be forest no matter the moisture.
     let thaw = smoothstep(-9.0, -1.0, temperature_c);

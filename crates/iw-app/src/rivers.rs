@@ -49,10 +49,14 @@ pub fn build(mesh: &Mesh, cells: &ViewCells, sea_level_m: f32) -> Vec<RiverVerte
             continue;
         }
         let j = j as usize;
-        let t = ((flux.ln() - ln_min) / (ln_max - ln_min)).clamp(0.0, 1.0);
-        let half_w_km = MIN_HALF_WIDTH_KM + (MAX_HALF_WIDTH_KM - MIN_HALF_WIDTH_KM) * t;
-        let alpha = 0.45 + 0.45 * t;
-        let color = [RIVER_RGB[0], RIVER_RGB[1], RIVER_RGB[2], alpha];
+        // Width and opacity are evaluated at BOTH ends from each end's own
+        // flux, so a segment tapers as the river grows and every segment
+        // meeting at a node shares that node's width — joints stop popping.
+        let ramp = |f: f32| ((f.max(1.0).ln() - ln_min) / (ln_max - ln_min)).clamp(0.0, 1.0);
+        let ta = ramp(flux);
+        let tb = ramp(cells.water_flux_m3_yr[j].max(flux));
+        let width = |t: f32| MIN_HALF_WIDTH_KM + (MAX_HALF_WIDTH_KM - MIN_HALF_WIDTH_KM) * t;
+        let shade = |t: f32| [RIVER_RGB[0], RIVER_RGB[1], RIVER_RGB[2], 0.45 + 0.45 * t];
 
         let a: Vec3 = mesh.centers[i];
         let b: Vec3 = mesh.centers[j];
@@ -63,18 +67,24 @@ pub fn build(mesh: &Mesh, cells: &ViewCells, sea_level_m: f32) -> Vec<RiverVerte
             continue;
         }
         let side = mid.cross(dir).normalize_or_zero();
-        let ang = half_w_km / iw_mesh::EARTH_RADIUS_KM;
-        let offset = side * ang;
+        let off_a = side * (width(ta) / iw_mesh::EARTH_RADIUS_KM);
+        let off_b = side * (width(tb) / iw_mesh::EARTH_RADIUS_KM);
 
         let ea = (cells.elevation_m[i] - sea_level_m).max(0.0) + sea_level_m;
         let eb = cells.elevation_m[j].max(sea_level_m);
-        let corner = |p: Vec3, off: Vec3, elev: f32| RiverVertex {
+        let corner = |p: Vec3, off: Vec3, elev: f32, color: [f32; 4]| RiverVertex {
             pos: (p + off).normalize().to_array(),
             elevation_m: elev,
             color,
         };
-        let (a1, a2) = (corner(a, -offset, ea), corner(a, offset, ea));
-        let (b1, b2) = (corner(b, -offset, eb), corner(b, offset, eb));
+        let (a1, a2) = (
+            corner(a, -off_a, ea, shade(ta)),
+            corner(a, off_a, ea, shade(ta)),
+        );
+        let (b1, b2) = (
+            corner(b, -off_b, eb, shade(tb)),
+            corner(b, off_b, eb, shade(tb)),
+        );
         verts.extend_from_slice(&[a1, b1, a2, a2, b1, b2]);
     }
     verts

@@ -53,11 +53,12 @@ layout(push_constant) uniform Push {
     uvec4 flags;         // x = 0 globe / 1 mercator, y = 1 when beauty shading is on
 } pc;
 
-// Fraction of the three corner cells that are LAND (0, 1/3, 2/3 or 1).
-// Interpolated, its 0.5 contour runs mid-way between land and water cell
-// centres — a scale-free, sub-cell shoreline for the fragment stage to
-// perturb (see the crinkle block in globe.frag).
-layout(location = 5) out float v_landness;
+// Fractions of the three corner cells that are LAND (x) and LAKE (y), in
+// thirds. Interpolated, the land fraction's 0.5 contour runs mid-way between
+// land and water cell centres — a scale-free, sub-cell shoreline for the
+// fragment stage to perturb (see the crinkle block in globe.frag); the lake
+// fraction colours the water that drowned land fragments turn into.
+layout(location = 5) out vec2 v_landlake;
 
 layout(location = 0) out vec3 v_normal;
 // Not flat: in the beauty view a corner averages the albedo of the cells that
@@ -96,9 +97,16 @@ void main() {
 
     vec3 n = normalize(in_pos);
     v_sphere = n;
-    v_landness = ((kind_of(cd.material) < 0.5 ? 1.0 : 0.0)
-                + (kind_of(cy.material) < 0.5 ? 1.0 : 0.0)
-                + (kind_of(cz.material) < 0.5 ? 1.0 : 0.0)) * (1.0 / 3.0);
+    {
+        float ka = kind_of(cd.material);
+        float kb = kind_of(cy.material);
+        float kc = kind_of(cz.material);
+        v_landlake = vec2((ka < 0.5 ? 1.0 : 0.0) + (kb < 0.5 ? 1.0 : 0.0)
+                              + (kc < 0.5 ? 1.0 : 0.0),
+                          (ka > 1.5 ? 1.0 : 0.0) + (kb > 1.5 ? 1.0 : 0.0)
+                              + (kc > 1.5 ? 1.0 : 0.0))
+            * (1.0 / 3.0);
+    }
     vec4 mat = unpackUnorm4x8(cd.material);
     float kind = floor(mat.x * 255.0 + 0.5);
     v_mat = vec4(kind, mat.y, mat.z, mat.w);

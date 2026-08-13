@@ -146,6 +146,9 @@ const float SHORE_NOISE_AMP = 0.26;
 const float FOAM_BAND = 0.05;
 /// Shelf water a drowned coastal fragment turns into (linear).
 const vec3 SHELF_ALBEDO = vec3(0.045, 0.17, 0.26);
+/// Lake-shore water a drowned fragment turns into next to a lake (linear,
+/// matched to the lake shallow palette).
+const vec3 LAKE_NEAR_ALBEDO = vec3(0.06, 0.28, 0.45);
 /// Sand an emergent water fragment turns into (linear).
 const vec3 SAND_ALBEDO = vec3(0.50, 0.40, 0.22);
 /// Surf line tint (linear).

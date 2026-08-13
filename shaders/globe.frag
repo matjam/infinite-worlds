@@ -18,9 +18,10 @@ layout(location = 3) in vec3 v_sphere;
 // x = surface kind (0 land, 1 ocean, 2 lake), y = ocean depth 0..1,
 // z = ice fraction 0..1, w = reserved.
 layout(location = 4) flat in vec4 v_mat;
-// Interpolated land fraction of the cells meeting at each corner; its 0.5
-// contour is the sub-cell shoreline.
-layout(location = 5) in float v_landness;
+// Interpolated fractions of the cells meeting at each corner:
+// x = land fraction (its 0.5 contour is the sub-cell shoreline),
+// y = lake fraction (colours the water a drowned fragment turns into).
+layout(location = 5) in vec2 v_landlake;
 
 layout(location = 0) out vec4 o_color;
 
@@ -49,39 +50,31 @@ void main() {
 
     vec3 albedo = to_linear(v_color.rgb);
     vec3 N = normalize(v_normal);
-
-    if (mercator) {
-        // Flat map: hillshade from a fixed top-left light. No limb, no glint,
-        // no clouds — none of them mean anything in a projection.
-        float l = clamp(dot(N, MERCATOR_LIGHT), 0.0, 1.0);
-        vec3 col = albedo * (MERCATOR_AMBIENT + (1.0 - MERCATOR_AMBIENT) * l);
-        o_color = vec4(to_srgb(col), 1.0);
-        return;
-    }
-
     vec3 S = normalize(v_sphere);
-    vec3 V = normalize(pc.cam_pos_exag.xyz - v_world);
     float kind = v_mat.x;
     float depth_t = v_mat.y;
     float ice_t = v_mat.z;
     bool water = kind > 0.5;
 
-    // --- Shoreline crinkle (globe beauty only). `v_landness` interpolates
-    // the corner cells' land fraction, so its 0.5 contour runs mid-way
-    // between land and water cell centres — re-drawing the land/water
-    // decision at a noise-perturbed offset of that contour dissolves the
-    // polygon edges into a wandering shoreline. The noise amplitude is below
-    // 0.5 by construction, so open ocean (landness 0) and inland (landness 1)
-    // can never flip. Works for sea and lake shores alike — the field is
-    // kind-based, no elevations involved.
-    // Lake fragments are exempt: a small lake's landness never drops below
-    // ~2/3 (its corners blend the surrounding land), so the contour would
-    // paint the whole lake as beach.
-    if (ice_t < 0.5 && kind < 1.5) {
-        float crinkled = v_landness - 0.5 + shore_noise(S) * SHORE_NOISE_AMP;
+    // --- Shoreline crinkle (sea AND lake shores, globe and Mercator).
+    // `v_landlake.x` interpolates the corner cells' land fraction, so its 0.5
+    // contour runs mid-way between land and water cell centres — re-drawing
+    // the land/water decision at a noise-perturbed offset of that contour
+    // dissolves the polygon edges into a wandering shoreline. The noise
+    // amplitude is below 0.5 by construction, so open water (landness 0) and
+    // deep inland (landness 1) can never flip. A lake fragment only joins in
+    // where its landness dips below ~0.55: a lake smaller than a couple of
+    // cells never gets there (its corners blend the surrounding land), which
+    // is exactly the case where the contour would beach the whole lake.
+    bool lake_frag = kind > 1.5;
+    if (ice_t < 0.5 && (!lake_frag || v_landlake.x < 0.55)) {
+        float crinkled = v_landlake.x - 0.5 + shore_noise(S) * SHORE_NOISE_AMP;
         if (!water && crinkled < 0.0) {
-            // The coast wandered over this land fragment: shelf water.
-            albedo = SHELF_ALBEDO;
+            // The shore wandered over this land fragment: shallow water,
+            // coloured for whichever kind of water the neighbours hold.
+            bool lakey = v_landlake.y > 0.2;
+            albedo = lakey ? LAKE_NEAR_ALBEDO : SHELF_ALBEDO;
+            kind = lakey ? 2.0 : 1.0;
             water = true;
             depth_t = 0.0;
         } else if (water && crinkled > 0.0) {
@@ -95,7 +88,9 @@ void main() {
     }
 
     // --- Sub-cell relief detail: hills as normal perturbation (land only).
-    if (!water && ice_t < 0.5) {
+    // Globe only: the Mercator branch's normal lives in map space, where
+    // sphere-tangent perturbations would be nonsense.
+    if (!mercator && !water && ice_t < 0.5) {
         float fp = length(fwidth(S)) * HILL_FREQ_B;
         float fade = 1.0 - smoothstep(HILL_FADE_FOOTPRINT, HILL_FADE_FOOTPRINT * 2.0, fp);
         if (fade > 0.0) {
@@ -112,6 +107,17 @@ void main() {
             N = normalize(N + (e1 * hx + e2 * hy) * (amp * 4.0));
         }
     }
+
+    if (mercator) {
+        // Flat map: hillshade from a fixed top-left light. No limb, no glint,
+        // no clouds — none of them mean anything in a projection.
+        float l = clamp(dot(N, MERCATOR_LIGHT), 0.0, 1.0);
+        vec3 col = albedo * (MERCATOR_AMBIENT + (1.0 - MERCATOR_AMBIENT) * l);
+        o_color = vec4(to_srgb(col), 1.0);
+        return;
+    }
+
+    vec3 V = normalize(pc.cam_pos_exag.xyz - v_world);
 
     // Sphere-level day mask: relief may brighten a slope, but never on the
     // night side.

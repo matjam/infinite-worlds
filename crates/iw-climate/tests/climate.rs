@@ -626,3 +626,57 @@ fn zonal_profile_report() {
         flat_west / flat_east
     );
 }
+
+/// A fixed analytic world painted onto an arbitrary mesh: one big continent
+/// (30 W..60 E, 50 S..50 N) with a north-south ridge near its west coast,
+/// everything else abyssal ocean. Same planet whatever the tessellation.
+fn analytic_world(mesh: &Mesh) -> Planet {
+    let mut planet = Planet::new(config(6), mesh.n_cells());
+    planet.sea_level_m = 0.0;
+    for i in 0..mesh.n_cells() {
+        let (la, lo) = (lat_deg(mesh, i), lon_deg(mesh, i));
+        planet.elevation_m[i] = if (-50.0..50.0).contains(&la) && (-30.0..60.0).contains(&lo) {
+            // Coastal plain rising inland, plus a meridional ridge at 10 W.
+            let ridge = 2500.0 * (1.0 - ((lo + 10.0) / 8.0).abs()).max(0.0);
+            200.0 + ridge
+        } else {
+            OCEAN_FLOOR_M
+        };
+    }
+    planet
+}
+
+/// The climate loop must be (approximately) TESSELLATION-INVARIANT: the same
+/// analytic world at 40k and at 150k Voronoi cells has to converge to the
+/// same land precipitation, or every calibration constant silently depends
+/// on the fidelity slider. (Guards the metric sweeps/widths machinery.)
+#[test]
+fn precipitation_is_budget_invariant() {
+    let stats = |budget: u32| -> (f32, f32) {
+        let density = |_: glam::Vec3| 1.0f32;
+        let mesh = Mesh::build_voronoi(budget, 7, &density);
+        let mut planet = analytic_world(&mesh);
+        run(&mut planet, &mesh, &mut ClimateProcess::new(), 30);
+        let land_mean = mean_where(&mesh, &planet.precip_mm_yr, |i| {
+            planet.elevation_m[i] >= 0.0
+        });
+        // Interior sample: the continent's east-central bulk, far from coasts.
+        let interior = mean_where(&mesh, &planet.precip_mm_yr, |i| {
+            planet.elevation_m[i] >= 0.0
+                && (-25.0..25.0).contains(&lat_deg(&mesh, i))
+                && (10.0..40.0).contains(&lon_deg(&mesh, i))
+        });
+        (land_mean, interior)
+    };
+    let (mean_a, int_a) = stats(40_000);
+    let (mean_b, int_b) = stats(150_000);
+    let rel = |a: f32, b: f32| (a - b).abs() / a.max(b).max(1.0);
+    assert!(
+        rel(mean_a, mean_b) < 0.20,
+        "land mean precip must not depend on cell budget: {mean_a:.0} @40k vs {mean_b:.0} @150k"
+    );
+    assert!(
+        rel(int_a, int_b) < 0.35,
+        "interior precip must not depend on cell budget: {int_a:.0} @40k vs {int_b:.0} @150k"
+    );
+}
