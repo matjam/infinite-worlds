@@ -37,6 +37,10 @@ const TARGET_PLATES_MIN: usize = 5;
 const TARGET_PLATES_MAX: usize = 8;
 /// Speed given to the ocean plates invented at the hand-off, m/yr.
 const SEED_PLATE_SPEED_M_YR: f32 = 0.04;
+/// Divergence kick applied to the two halves of a split supercontinent at
+/// the drift handoff, m/yr. Gentler than a live rift's separation (0.07):
+/// this is a nudge for slab pull to amplify, not an imposed breakup.
+const HANDOFF_SPLIT_KICK_M_YR: f32 = 0.03;
 /// Distance-metric warp for the hand-off Voronoi, as a fraction of the base
 /// cost. Straight great-circle plate boundaries are the tell-tale of a Voronoi
 /// partition; a noisy metric makes them meander.
@@ -235,6 +239,63 @@ pub(crate) fn partition_into_plates(
         cluster_of[k] = cluster_of[r];
     }
 
+    // A welded supercontinent arrives here as ONE cluster, and the ocean-seed
+    // filler below then places every remaining plate at maximal distance from
+    // it — the drift era reliably started with all boundaries in the ocean
+    // and the whole landmass on a single immortal plate. Split the dominant
+    // cluster in two along its craton structure (Laurasia/Gondwana): group
+    // its member cratons around the farthest pair of craton centroids, so the
+    // initial boundary transects the landmass between shields.
+    let mut split_pair: Option<(u16, u16)> = None;
+    {
+        let total_cont: f64 = cluster_mass.iter().sum();
+        let big = (0..cluster_mass.len()).max_by(|a, b| cluster_mass[*a].total_cmp(&cluster_mass[*b]));
+        if let Some(big) = big.filter(|b| total_cont > 0.0 && cluster_mass[*b] > 0.55 * total_cont) {
+            let mut csum = vec![DVec3::ZERO; ncr];
+            for c in 0..n {
+                let p = planet.plate_id[c] as usize;
+                if p < ncr && planet.crust_type[c] == CrustType::Continental {
+                    csum[p] += mesh.centers[c].as_dvec3();
+                }
+            }
+            let members: Vec<usize> = (0..ncr)
+                .filter(|k| mass[*k] > 0.0 && cluster_of[*k] == big as u16)
+                .collect();
+            if members.len() >= 2 {
+                let dir = |k: usize| csum[k].normalize_or(DVec3::Z);
+                let (mut sa, mut sb, mut best) = (members[0], members[1], f64::INFINITY);
+                for (i, &a) in members.iter().enumerate() {
+                    for &b in &members[i + 1..] {
+                        let d = dir(a).dot(dir(b));
+                        if d < best {
+                            (sa, sb, best) = (a, b, d);
+                        }
+                    }
+                }
+                let new_id = cluster_omega.len() as u16;
+                cluster_omega.push(DVec3::ZERO);
+                cluster_mass.push(0.0);
+                let (da, db) = (dir(sa), dir(sb));
+                let mut moved = 0.0f64;
+                for &k in &members {
+                    if dir(k).dot(db) > dir(k).dot(da) {
+                        cluster_of[k] = new_id;
+                        cluster_omega[big] -=
+                            planet.plates[k].euler_pole * planet.plates[k].omega_rad_myr * mass[k];
+                        cluster_omega[new_id as usize] +=
+                            planet.plates[k].euler_pole * planet.plates[k].omega_rad_myr * mass[k];
+                        moved += mass[k];
+                    }
+                }
+                cluster_mass[big as usize] -= moved;
+                *cluster_mass.last_mut().expect("just pushed") = moved;
+                if moved > 0.0 {
+                    split_pair = Some((big as u16, new_id));
+                }
+            }
+        }
+    }
+
     // Seed labels from continental cells.
     scratch.u16a.fill(u16::MAX);
     let mut cluster_sum = vec![DVec3::ZERO; cluster_mass.len()];
@@ -274,6 +335,21 @@ pub(crate) fn partition_into_plates(
         cluster_omega.remove(small);
         cluster_mass.remove(small);
         cluster_sum.remove(small);
+        // Keep the split pair pointing at the right clusters through the
+        // renumbering; drop it if either half was folded away.
+        split_pair = split_pair.and_then(|(a, b)| {
+            let remap = |x: u16| {
+                let x = x as usize;
+                if x == small {
+                    None
+                } else if x > small {
+                    Some((x - 1) as u16)
+                } else {
+                    Some(x as u16)
+                }
+            };
+            remap(a).zip(remap(b))
+        });
         for l in scratch.u16a.iter_mut() {
             if *l == u16::MAX {
                 continue;
@@ -361,6 +437,36 @@ pub(crate) fn partition_into_plates(
             rift_partner: None,
             rift_born_myr: f64::NEG_INFINITY,
         });
+    }
+
+    // The two halves of a split supercontinent start with near-identical
+    // motion, and QUIET_MERGE would re-weld the handoff boundary within a
+    // dozen Myr — before slab pull has differentiated them. Give the pair
+    // the same young-rift immunity as a live rift, plus a gentle divergence
+    // kick for the forces to amplify.
+    if let Some((a, b)) = split_pair {
+        let (ai, bi) = (a as usize, b as usize);
+        if ai < plates.len() && bi < plates.len() {
+            let ca = cluster_sum[ai].normalize_or(DVec3::Z).as_vec3();
+            let cb = cluster_sum[bi].normalize_or(DVec3::Z).as_vec3();
+            let kick = |plate: &mut Plate, from: glam::Vec3, toward: glam::Vec3| {
+                let w = plate.euler_pole * plate.omega_rad_myr
+                    + omega_for_velocity(from, -tangent_toward(from, toward) * HANDOFF_SPLIT_KICK_M_YR);
+                let omega = w.length();
+                plate.euler_pole = if omega > 1e-12 { w / omega } else { DVec3::Z };
+                plate.omega_rad_myr = omega;
+            };
+            kick(&mut plates[ai], ca, cb);
+            kick(&mut plates[bi], cb, ca);
+            plates[ai].rift_partner = Some(b);
+            plates[ai].rift_born_myr = planet.time_myr;
+            plates[bi].rift_partner = Some(a);
+            plates[bi].rift_born_myr = planet.time_myr;
+            ctx.progress
+                .event(iw_core::ProgressEvent::Milestone(format!(
+                    "the supercontinent hands off as two plates ({a} and {b})"
+                )));
+        }
     }
 
     planet.plate_id.copy_from_slice(&scratch.u16a);

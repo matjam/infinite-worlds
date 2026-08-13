@@ -204,10 +204,16 @@ pub(crate) fn compact_plates(planet: &mut Planet) -> bool {
             *p = remap[*p as usize];
         }
     }
-    // `welded_to` points at plate ids; keep it pointing somewhere valid.
+    // `welded_to` and `rift_partner` point at plate ids; keep them pointing
+    // somewhere valid (a dangling rift partner would grant weld immunity to
+    // an unrelated plate after renumbering).
     for plate in kept.iter_mut() {
         plate.welded_to = plate
             .welded_to
+            .and_then(|w| remap.get(w as usize).copied())
+            .filter(|w| *w != u16::MAX);
+        plate.rift_partner = plate
+            .rift_partner
             .and_then(|w| remap.get(w as usize).copied())
             .filter(|w| *w != u16::MAX);
     }

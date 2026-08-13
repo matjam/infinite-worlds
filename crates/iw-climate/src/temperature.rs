@@ -236,6 +236,19 @@ pub fn seasonal_extremes_c(planet: &Planet, mesh: &Mesh) -> (Vec<f32>, Vec<f32>)
 }
 
 /// Write the annual-mean temperature field into `planet.temperature_c`.
+/// Global-mean surface temperature the carbonate-silicate thermostat relaxes
+/// toward, degrees C (Earth's is ~14).
+const THERMOSTAT_REF_C: f32 = 13.5;
+/// Proportional gain of the thermostat: fraction of the geography-driven
+/// deviation from [`THERMOSTAT_REF_C`] cancelled by greenhouse adjustment.
+/// Earth's weathering feedback is an integrator over ~0.1-1 Myr; at climate
+/// step cadence a proportional term is the stateless equivalent.
+const THERMOSTAT_GAIN: f32 = 0.6;
+/// The thermostat's authority is capped so it damps feedback loops without
+/// overpowering the user's `temperature_offset_c` or a genuinely extreme
+/// configuration (a snowball stays possible if the user asks for one).
+const THERMOSTAT_MAX_C: f32 = 6.0;
+
 pub(crate) fn update(planet: &mut Planet, mesh: &Mesh, dist: &[u8]) {
     let config = planet.config.clone();
     let time_myr = planet.time_myr;
@@ -243,13 +256,37 @@ pub(crate) fn update(planet: &mut Planet, mesh: &Mesh, dist: &[u8]) {
     let elev = &planet.elevation_m;
     let ice = &planet.ice_thickness_m;
     let latlon = &mesh.latlon;
+
+    // Carbonate-silicate thermostat (stateless): the more land sits high,
+    // icy or polar, the colder the raw global mean, and the more greenhouse
+    // warming the slow weathering feedback would supply. Without this the
+    // ice-altitude feedback ran unopposed and any config change that exposed
+    // more cold land slid the whole planet toward a snowball. The mean is
+    // taken WITHOUT the user's offset or the glacial cycle: the thermostat
+    // stabilises against geography, not against knobs or Milankovitch.
+    let mut raw_sum = 0.0f64;
+    let mut area_sum = 0.0f64;
+    for i in 0..planet.n_cells() {
+        let surface = lapse_surface_m(elev[i], ice[i], sea);
+        let base = zonal_mean_c(latlon[i][0]);
+        let maritime = MARITIME_GAIN * (1.0 - continentality(dist[i])) * (MARITIME_REF_C - base);
+        let raw = base + maritime - LAPSE_RATE_C_PER_M * surface.max(0.0);
+        let a = mesh.areas_km2[i] as f64;
+        raw_sum += raw as f64 * a;
+        area_sum += a;
+    }
+    let raw_mean = (raw_sum / area_sum.max(1.0)) as f32;
+    let thermostat =
+        (THERMOSTAT_GAIN * (THERMOSTAT_REF_C - raw_mean)).clamp(-THERMOSTAT_MAX_C, THERMOSTAT_MAX_C);
+
     planet
         .temperature_c
         .par_iter_mut()
         .enumerate()
         .for_each(|(i, t)| {
             let surface = lapse_surface_m(elev[i], ice[i], sea);
-            *t = annual_mean_temperature_c(latlon[i][0], surface, dist[i], &config, time_myr);
+            *t = annual_mean_temperature_c(latlon[i][0], surface, dist[i], &config, time_myr)
+                + thermostat;
         });
 }
 

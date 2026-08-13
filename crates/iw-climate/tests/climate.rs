@@ -115,15 +115,23 @@ fn lapse_rate_cools_mountains() {
         (drop - 19.5).abs() < 0.5,
         "3 km of relief should cool by ~19.5 C (6.5 C/km), got {drop}"
     );
-    // The pure helper must match the field exactly.
-    let expect = annual_mean_temperature_c(
-        mesh.latlon[high][0],
-        3005.0,
-        1,
-        &planet.config,
-        planet.time_myr,
+    // The pure helper must match the field up to the (uniform) global
+    // thermostat offset: the same offset the low island received.
+    let helper = |i: usize, surface: f32| {
+        annual_mean_temperature_c(
+            mesh.latlon[i][0],
+            surface,
+            1,
+            &planet.config,
+            planet.time_myr,
+        )
+    };
+    let offset_low = planet.temperature_c[low] - helper(low, 5.0);
+    let offset_high = planet.temperature_c[high] - helper(high, 3005.0);
+    assert!(
+        (offset_high - offset_low).abs() < 1e-4,
+        "thermostat offset must be uniform: {offset_low} vs {offset_high}"
     );
-    assert!((planet.temperature_c[high] - expect).abs() < 1e-4);
 }
 
 /// Zonal continent spanning 35..65 deg N and 180 deg of longitude: wide enough

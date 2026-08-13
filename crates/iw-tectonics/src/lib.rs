@@ -126,9 +126,12 @@ pub const CRATON_EDGE_THICKNESS_M: f32 = 33_000.0;
 /// Calibration: 45 km floats at +2.6 km, which is a plateau, not a shield. Real
 /// cratons are thick *and* low because their depleted lithospheric roots are
 /// cold and dense; this model has no root term, so the crust has to be thinner
-/// to stand at a shield-like height. 40 km gives +1.7 km at the core, tapering
-/// quadratically to the drowned edge.
-pub const CRATON_CORE_THICKNESS_M: f32 = 40_000.0;
+/// to stand at a shield-like height. 40 km gave +2.1 km cores and a land mean
+/// of 1185 m (Earth: 840) while the margins still drowned — the freeboard
+/// SPREAD was the problem, not its centre. 38 km (+1.6 km core) with the
+/// 33 km edge puts most craton area in the +200..800 m platform band where
+/// Earth's continental area actually lives.
+pub const CRATON_CORE_THICKNESS_M: f32 = 38_000.0;
 /// Tibet-scale ceiling on crustal thickening, metres.
 pub const MAX_CRUST_THICKNESS_M: f32 = 70_000.0;
 /// Crustal thickness at which a stretched continental cell breaks and becomes
