@@ -10,3 +10,5 @@ rayon.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+rand.workspace = true
+rand_pcg.workspace = true
