@@ -136,7 +136,10 @@ impl Simulation {
         let mut config = config;
         config.sanitize();
         let cursor = Cursor::START.normalized(&config);
-        let planet = Planet::new(config, mesh.n_cells());
+        let mut planet = Planet::new(config, mesh.n_cells());
+        // The tessellation is simulation state (docs/voronoi-v2.md): keep the
+        // generators with the planet so checkpoints can rebuild the mesh.
+        planet.mesh_generators = mesh.generators.clone();
         Simulation {
             planet,
             mesh,
@@ -233,8 +236,13 @@ impl Simulation {
 
     /// Continue from a planet loaded elsewhere (checkpoint resume). The
     /// schedule position is derived from `planet.step_index` under the
-    /// planet's own config.
+    /// planet's own config. A planet carrying Voronoi generators brings its
+    /// own tessellation: the mesh is rebuilt from them (deterministically).
     pub fn resume_from(&mut self, planet: Planet) -> anyhow::Result<()> {
+        if !planet.mesh_generators.is_empty() && planet.mesh_generators.len() != self.mesh.n_cells()
+        {
+            self.mesh = Arc::new(Mesh::build_from_generators(&planet.mesh_generators));
+        }
         if planet.n_cells() != self.mesh.n_cells() {
             anyhow::bail!(
                 "checkpoint has {} cells, mesh has {}",
@@ -259,14 +267,6 @@ impl Simulation {
     pub fn rerun_from_phase(&mut self, phase: Phase, config: PlanetConfig) -> anyhow::Result<()> {
         let mut config = config;
         config.sanitize();
-        if config.subdivision_level != self.mesh.level {
-            anyhow::bail!(
-                "rerun_from_phase({phase:?}): config level {} != mesh level {}; \
-                 rebuild the mesh and regenerate instead",
-                config.subdivision_level,
-                self.mesh.level
-            );
-        }
         let Some(prev) = Phase::ALL.get(phase.index().wrapping_sub(1)).copied() else {
             // No earlier phase to resume from: a full regenerate.
             let mesh = Arc::clone(&self.mesh);
@@ -278,11 +278,25 @@ impl Simulation {
             .store
             .load(&tag)
             .map_err(|e| anyhow::anyhow!("loading checkpoint {tag}: {e}"))?;
+        // The checkpoint carries its own tessellation (post-retess for that
+        // era boundary); rebuild the mesh from it when it differs.
+        if !planet.mesh_generators.is_empty() && planet.mesh_generators.len() != self.mesh.n_cells()
+        {
+            self.mesh = Arc::new(Mesh::build_from_generators(&planet.mesh_generators));
+        }
         if planet.n_cells() != self.mesh.n_cells() {
             anyhow::bail!(
                 "checkpoint {tag} has {} cells, mesh has {}",
                 planet.n_cells(),
                 self.mesh.n_cells()
+            );
+        }
+        if planet.config.cell_budget != config.cell_budget {
+            anyhow::bail!(
+                "rerun_from_phase({phase:?}): cell budget changed ({} -> {}); \
+                 regenerate instead",
+                planet.config.cell_budget,
+                config.cell_budget
             );
         }
         planet.config = config;
@@ -394,6 +408,20 @@ impl Simulation {
 
     fn on_phase_completed(&mut self, phase: Phase) {
         self.planet.phase = phase;
+        // Adaptive re-tessellation between eras (docs/voronoi-v2.md §2): the
+        // terrain this era built decides where the next era's cells crowd.
+        // Runs BEFORE the checkpoint so the checkpoint carries the new
+        // generators and a rerun-from-here resumes on the new mesh.
+        if phase.next().is_some() && !self.mesh.generators.is_empty() {
+            let epoch = phase.index() as u64 + 1;
+            let before = self.mesh.n_cells();
+            crate::retess::retessellate(&mut self.planet, &mut self.mesh, epoch);
+            self.progress.event(ProgressEvent::Milestone(format!(
+                "re-tessellated for the next era: {} -> {} cells",
+                before,
+                self.mesh.n_cells()
+            )));
+        }
         let tag = phase_tag(phase);
         if let Err(e) = self.store.save(&tag, &self.planet) {
             log::error!("checkpoint {tag} failed: {e:#}");

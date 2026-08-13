@@ -186,7 +186,9 @@ fn flow_pass(planet: &mut Planet, ctx: &mut Ctx<'_>, scratch: &mut GlacialScratc
         scratch.delta[i] = 0.0;
     }
 
-    let mut out: [f32; 8] = [0.0; 8];
+    // Voronoi cells have variable valence (typically 4-9, occasionally more);
+    // the scratch grows to the widest cell seen and never reallocates after.
+    let mut out: Vec<f32> = Vec::with_capacity(12);
     for cell in 0..n as u32 {
         let i = cell as usize;
         let h = planet.ice_thickness_m[i];
@@ -196,6 +198,8 @@ fn flow_pass(planet: &mut Planet, ctx: &mut Ctx<'_>, scratch: &mut GlacialScratc
         let s = scratch.surface_m[i];
         let base = mesh.neighbor_offsets[i] as usize;
         let nb = mesh.neighbors_of(cell);
+        out.clear();
+        out.resize(nb.len(), 0.0);
         let area_i = ctx.geom.area_m2[i];
         let mut total = 0.0f32;
         let mut best_slide = 0.0f32;

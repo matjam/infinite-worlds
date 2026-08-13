@@ -40,6 +40,9 @@ fn build_config(args: &GenArgs) -> anyhow::Result<PlanetConfig> {
     let mut config = PlanetConfig {
         seed: args.seed,
         subdivision_level: args.level,
+        cell_budget: args
+            .budget
+            .unwrap_or_else(|| (10u32 * 4u32.pow(args.level.min(10) as u32) + 2).max(10_000)),
         water_budget: args.water,
         ..PlanetConfig::default()
     };
@@ -66,7 +69,12 @@ fn build_config(args: &GenArgs) -> anyhow::Result<PlanetConfig> {
 
 fn run_gen(args: GenArgs) -> anyhow::Result<()> {
     let config = build_config(&args)?;
-    let mesh = Arc::new(Mesh::build(config.subdivision_level));
+    let density = iw_tectonics::genesis_density(config.seed, config.craton_count);
+    let mesh = Arc::new(Mesh::build_voronoi(
+        config.cell_budget,
+        config.seed,
+        &density,
+    ));
     let store = Arc::new(FileStore::new(args.out.clone())?);
     let history = HistoryStore::new(args.out.clone(), config.history_cap_bytes)?;
     let progress: Arc<dyn ProgressSink> = Arc::new(CliProgress::default());
@@ -93,7 +101,11 @@ fn run_resume(args: ResumeArgs) -> anyhow::Result<()> {
         .load(&boundary_tag)
         .map_err(|e| anyhow::anyhow!("loading checkpoint {boundary_tag}: {e:#}"))?;
     let config = boundary.config.clone();
-    let mesh = Arc::new(Mesh::build(config.subdivision_level));
+    let mesh = if boundary.mesh_generators.is_empty() {
+        Arc::new(Mesh::build(config.subdivision_level))
+    } else {
+        Arc::new(Mesh::build_from_generators(&boundary.mesh_generators))
+    };
     let history = HistoryStore::new(args.from.clone(), config.history_cap_bytes)?;
     let progress: Arc<dyn ProgressSink> = Arc::new(CliProgress::default());
     let processes: Vec<Box<dyn Process>> = build_processes(&[]);

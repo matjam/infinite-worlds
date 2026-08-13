@@ -294,4 +294,24 @@ impl Hydrology {
             }
         }
     }
+
+    /// Publish the routing into `planet.flow_to` as neighbor-slot indices
+    /// (docs/voronoi-v2.md §4): a cell's river exits through the edge shared
+    /// with its downstream neighbor. Renderers thread the polyline through
+    /// those edges; [`iw_core::planet::FLOW_NONE`] marks ocean/sinks.
+    pub(crate) fn publish_flow_edges(&self, planet: &mut Planet, mesh: &Mesh) {
+        use iw_core::planet::FLOW_NONE;
+        for i in 0..planet.n_cells() {
+            let d = self.downstream[i];
+            planet.flow_to[i] = if d == NO_DOWNSTREAM {
+                FLOW_NONE
+            } else {
+                mesh.neighbors_of(i as u32)
+                    .iter()
+                    .position(|&m| m == d)
+                    .map(|slot| slot as u8)
+                    .unwrap_or(FLOW_NONE)
+            };
+        }
+    }
 }

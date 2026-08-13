@@ -16,9 +16,6 @@ pub const EST_BYTES_PER_CELL: u64 = 900;
 
 /// Subdivision levels the panel offers. Below 4 the planet is a curiosity;
 /// above 9 the estimate leaves desktop territory.
-pub const MIN_LEVEL: u8 = 4;
-/// See [`MIN_LEVEL`].
-pub const MAX_LEVEL: u8 = 9;
 
 /// Human-readable phase names, in schedule order.
 pub fn phase_name(phase: Phase) -> &'static str {
@@ -97,9 +94,9 @@ impl PanelState {
         self.seed_text = x.to_string();
     }
 
-    /// Estimated resident memory for the current subdivision level.
+    /// Estimated resident memory for the current cell budget.
     pub fn est_bytes(&self) -> u64 {
-        self.config.n_cells() as u64 * EST_BYTES_PER_CELL
+        self.config.cell_budget as u64 * EST_BYTES_PER_CELL
     }
 }
 
@@ -157,16 +154,19 @@ pub fn show(
             }
 
             ui.separator();
-            let mut level = state.config.subdivision_level;
-            ui.add(egui::Slider::new(&mut level, MIN_LEVEL..=MAX_LEVEL).text("Subdivision level"));
-            state.config.subdivision_level = level;
+            let mut budget = state.config.cell_budget;
+            ui.add(
+                egui::Slider::new(&mut budget, 10_000..=3_000_000)
+                    .logarithmic(true)
+                    .text("Cell budget"),
+            );
+            state.config.cell_budget = budget;
             ui.label(format!(
-                "{} cells  ~{}",
-                state.config.n_cells(),
+                "{budget} terrain-sized Voronoi cells  ~{}",
                 format_bytes(state.est_bytes())
             ));
-            if level != running.subdivision_level {
-                ui.label("changing the level rebuilds the mesh");
+            if budget != running.cell_budget {
+                ui.label("changing the budget re-tessellates the planet");
             }
 
             ui.separator();
@@ -313,6 +313,7 @@ mod tests {
             craton_count: 22,
             glacial_intensity: 1.5,
             history_cap_bytes: 512 * 1024 * 1024,
+            cell_budget: 60_000,
         };
         c.sanitize();
         c
@@ -389,17 +390,13 @@ mod tests {
     }
 
     #[test]
-    fn memory_estimate_tracks_the_level() {
+    fn memory_estimate_tracks_the_budget() {
         let mut state = PanelState::from_config(&PlanetConfig::default());
-        state.config.subdivision_level = 6;
+        state.config.cell_budget = 40_000;
         let small = state.est_bytes();
-        state.config.subdivision_level = 8;
+        state.config.cell_budget = 640_000;
         let big = state.est_bytes();
-        assert!(big > small * 8, "level 8 has 16x the cells of level 6");
-        // Sanity against DESIGN.md §10: level 9 lands in the 2-4 GB band.
-        state.config.subdivision_level = 9;
-        let gib = state.est_bytes() as f64 / (1024.0 * 1024.0 * 1024.0);
-        assert!((2.0..=4.0).contains(&gib), "level 9 estimate {gib:.2} GiB");
+        assert!(big == small * 16, "estimate must scale with the budget");
         assert_eq!(format_bytes(1024 * 1024), "1 MiB");
         assert_eq!(format_bytes(3 * 1024 * 1024 * 1024), "3.0 GiB");
     }

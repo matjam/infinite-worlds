@@ -33,9 +33,14 @@ pub struct GenArgs {
     /// RNG seed.
     #[arg(long)]
     pub seed: u64,
-    /// Goldberg subdivision level (clamped to 4..=10).
-    #[arg(long)]
+    /// Legacy fidelity shorthand: sets the cell budget to the equivalent
+    /// Goldberg cell count (10 * 4^level + 2) unless --budget overrides it.
+    #[arg(long, default_value_t = 7)]
     pub level: u8,
+    /// Voronoi cell budget — the fidelity knob (docs/voronoi-v2.md). Cells are
+    /// terrain-sized; this caps how many exist. Overrides --level.
+    #[arg(long)]
+    pub budget: Option<u32>,
     /// Output directory for checkpoints, history and (optionally) maps.
     #[arg(long)]
     pub out: PathBuf,

@@ -37,6 +37,7 @@
 
 pub mod handle;
 pub mod narrator;
+mod retess;
 pub mod sim;
 
 #[doc(hidden)]

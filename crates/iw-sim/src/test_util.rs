@@ -53,6 +53,7 @@ fn synthetic_mesh(level: u8, centers: Vec<Vec3>, neighbors_of: Vec<Vec<u32>>) ->
         cos_radius: -1.0,
     };
     Mesh {
+        generators: Vec::new(),
         level,
         vertices: centers.clone(),
         centers,

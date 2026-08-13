@@ -86,7 +86,9 @@ pub fn diffuse(planet: &mut Planet, ctx: &mut Ctx<'_>, delta: &mut Vec<f32>) {
     let coeff = d_eff as f64 * ctx.dt_yr;
     let mesh = ctx.mesh;
 
-    let mut out: [f32; 8] = [0.0; 8];
+    // Voronoi cells have variable valence (typically 4-9, occasionally more);
+    // the scratch grows to the widest cell seen and never reallocates after.
+    let mut out: Vec<f32> = Vec::with_capacity(12);
     for cell in 0..n as u32 {
         let i = cell as usize;
         let avail = planet.sediment_m[i];
@@ -96,6 +98,8 @@ pub fn diffuse(planet: &mut Planet, ctx: &mut Ctx<'_>, delta: &mut Vec<f32>) {
         let h = planet.elevation_m[i];
         let base = mesh.neighbor_offsets[i] as usize;
         let nb = mesh.neighbors_of(cell);
+        out.clear();
+        out.resize(nb.len(), 0.0);
         let mut total = 0.0f32;
         for (k, &m) in nb.iter().enumerate() {
             let drop = h - planet.elevation_m[m as usize];

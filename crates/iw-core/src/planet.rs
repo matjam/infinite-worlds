@@ -122,12 +122,26 @@ pub struct Planet {
     pub biome: Vec<Biome>,
     /// Bitwise OR of [`cell_flags`] constants; tectonics rewrites each step.
     pub tectonic_flags: Vec<u8>,
+    /// River routing (docs/voronoi-v2.md): the neighbor-slot index this cell's
+    /// water exits through ([`FLOW_NONE`] for ocean, pits, and dry cells).
+    /// Written by the surface process; discharge is `water_flux_m3_yr`.
+    pub flow_to: Vec<u8>,
     pub columns: StrataColumns,
 
     // --- entities ---
     pub plates: Vec<Plate>,
     pub hotspots: Vec<Hotspot>,
+
+    /// The Voronoi generators this planet's mesh was built from, in f64 —
+    /// simulation state, because the tessellation is terrain-driven and
+    /// re-tessellates between eras. Checkpoint resume rebuilds the mesh from
+    /// these bit-exactly (the hull is deterministic). Empty only for legacy
+    /// Goldberg meshes in unit tests.
+    pub mesh_generators: Vec<glam::DVec3>,
 }
+
+/// Sentinel for [`Planet::flow_to`]: no outflow edge.
+pub const FLOW_NONE: u8 = u8::MAX;
 
 impl Planet {
     /// Fresh all-ocean proto-planet: thin young basaltic crust everywhere.
@@ -152,9 +166,11 @@ impl Planet {
             lake_depth_m: vec![0.0; n_cells],
             biome: vec![Biome::Unclassified; n_cells],
             tectonic_flags: vec![0; n_cells],
+            flow_to: vec![FLOW_NONE; n_cells],
             columns: StrataColumns::new(n_cells),
             plates: Vec::new(),
             hotspots: Vec::new(),
+            mesh_generators: Vec::new(),
             config,
         }
     }

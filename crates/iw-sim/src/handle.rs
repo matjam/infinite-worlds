@@ -66,9 +66,11 @@ pub struct SimStatus {
     pub total_steps: u64,
 }
 
-/// Builds (or rebuilds) a mesh for a subdivision level. Injected so `iw-sim`
-/// never calls `Mesh::build` itself and stays cheap to test.
-pub type MeshBuilder = Arc<dyn Fn(u8) -> Arc<Mesh> + Send + Sync>;
+/// Builds (or rebuilds) a mesh for a config (fresh tessellation: seed, cell
+/// budget, genesis density). Injected so `iw-sim` never builds meshes itself
+/// and stays cheap to test. Checkpoint-carried tessellations bypass this —
+/// they rebuild from their stored generators.
+pub type MeshBuilder = Arc<dyn Fn(&PlanetConfig) -> Arc<Mesh> + Send + Sync>;
 
 /// Default number of progress events buffered for the UI thread. When the UI
 /// falls behind, the oldest events are dropped.
@@ -82,6 +84,9 @@ pub struct SimHandle {
     status: Arc<ArcSwap<SimStatus>>,
     view: Arc<ArcSwapOption<PlanetView>>,
     events: Arc<EventRing>,
+    /// Latest mesh, published by the worker whenever the simulation's mesh
+    /// changes (regenerate, checkpoint resume, era re-tessellation).
+    mesh_updates: Arc<ArcSwapOption<Mesh>>,
     join: Option<JoinHandle<()>>,
 }
 
@@ -116,7 +121,10 @@ impl SimHandle {
             total_steps: sim.total_steps(),
         }));
         let (tx, rx) = crossbeam_channel::unbounded();
+        let mesh_updates: Arc<ArcSwapOption<Mesh>> = Arc::new(ArcSwapOption::empty());
         let worker = Worker {
+            last_mesh: Arc::clone(sim.mesh()),
+            mesh_updates: Arc::clone(&mesh_updates),
             sim,
             rx,
             status: Arc::clone(&status),
@@ -133,8 +141,16 @@ impl SimHandle {
             status,
             view,
             events,
+            mesh_updates,
             join: Some(join),
         }
+    }
+
+    /// Take the latest mesh published by the worker, if it changed since the
+    /// last call (regenerate, checkpoint resume, era re-tessellation). The UI
+    /// polls this each frame and re-uploads geometry when it fires.
+    pub fn take_new_mesh(&self) -> Option<Arc<Mesh>> {
+        self.mesh_updates.swap(None)
     }
 
     /// Send a command. Silently ignored once the worker has exited.
@@ -262,6 +278,10 @@ struct Worker {
     mode: Mode,
     /// Steps queued by `StepOnce` while not running.
     pending_steps: u64,
+    /// The mesh last published to the UI, for pointer-change detection.
+    last_mesh: Arc<Mesh>,
+    /// Where mesh changes are published (see [`SimHandle::take_new_mesh`]).
+    mesh_updates: Arc<ArcSwapOption<Mesh>>,
 }
 
 impl Worker {
@@ -309,6 +329,7 @@ impl Worker {
                 self.mode = Mode::Done;
                 self.pending_steps = 0;
             }
+            self.publish_mesh_if_changed();
             self.publish_status();
         }
     }
@@ -336,26 +357,18 @@ impl Worker {
                 }
             }
             SimCommand::Regenerate(config) => {
-                let mesh = if config.subdivision_level != self.sim.mesh().level {
-                    (self.mesh_builder)(config.subdivision_level)
-                } else {
-                    Arc::clone(self.sim.mesh())
-                };
+                // A new seed or budget is a new tessellation: always rebuild.
+                let mesh = (self.mesh_builder)(&config);
                 self.sim.reset(config, mesh);
+                self.publish_mesh_if_changed();
                 self.mode = Mode::Idle;
                 self.pending_steps = 0;
             }
             SimCommand::RerunFromPhase(phase, config) => {
-                if config.subdivision_level != self.sim.mesh().level {
-                    log::error!(
-                        "rerun from {phase:?} rejected: config level {} != mesh level {}; \
-                         use Regenerate to change the mesh",
-                        config.subdivision_level,
-                        self.sim.mesh().level
-                    );
-                } else if let Err(e) = self.sim.rerun_from_phase(phase, config) {
+                if let Err(e) = self.sim.rerun_from_phase(phase, config) {
                     log::error!("rerun from {phase:?} failed: {e:#}");
                 } else {
+                    self.publish_mesh_if_changed();
                     self.mode = Mode::Idle;
                     self.pending_steps = 0;
                 }
@@ -373,6 +386,16 @@ impl Worker {
             SimCommand::Shutdown => return false,
         }
         true
+    }
+
+    /// Publish the simulation's mesh to the UI when it changed (regenerate,
+    /// resume, or era re-tessellation).
+    fn publish_mesh_if_changed(&mut self) {
+        let current = self.sim.mesh();
+        if !Arc::ptr_eq(&self.last_mesh, current) {
+            self.last_mesh = Arc::clone(current);
+            self.mesh_updates.store(Some(Arc::clone(current)));
+        }
     }
 
     fn publish_status(&self) {

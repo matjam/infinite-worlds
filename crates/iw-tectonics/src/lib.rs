@@ -70,6 +70,27 @@ mod topology;
 
 pub use phase1::craton_min_separation_m;
 
+/// Genesis-epoch tessellation density (docs/voronoi-v2.md §2): cells crowd
+/// along the supercontinent's coast-to-be (the fractal outline where all the
+/// early visual interest lives), stay moderate across its interior, and sprawl
+/// over the open proto-ocean. Later epochs re-derive density from the actual
+/// terrain; this one comes straight from the genesis shapes.
+///
+/// Values in (0, 1]; deterministic in `(seed, craton_count)`.
+pub fn genesis_density(seed: u64, craton_count: u32) -> impl Fn(glam::Vec3) -> f32 + Sync {
+    // Octave pitch fixed: density needs coastline-scale structure, not
+    // cell-scale crenellation.
+    let genesis = craton::Genesis::new(seed, craton_count as usize, 30_000.0);
+    move |dir: glam::Vec3| match genesis.membership(dir) {
+        Some((_, f)) => {
+            // Rim (f -> 1) densest: that is the coastline and shelf.
+            let rim = ((f - 0.55) / 0.45).clamp(0.0, 1.0);
+            0.35 + 0.65 * rim * rim
+        }
+        None => 0.10,
+    }
+}
+
 // --- crust parameters (SI, DESIGN.md §5/§6) ---
 
 /// Reference oceanic crust thickness, metres.

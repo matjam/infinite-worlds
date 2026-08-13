@@ -1453,6 +1453,7 @@ dependencies = [
  "log",
  "rand",
  "rand_pcg",
+ "rayon",
 ]
 
 [[package]]

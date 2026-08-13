@@ -120,13 +120,6 @@ fn cratons_are_seeded_spaced_and_thick() {
 /// Pangaea-first breakup: over the drift era the supercontinent must fragment
 /// into several continental plates — the fragments' shapes coming from the
 /// rift graph is the entire point of the genesis model.
-///
-/// KNOWN GAP (2026-08-13): currently fails — rift fragments get recaptured by
-/// welding before they separate, so continental crust ends the era on one
-/// plate. Breakup dynamics (weld immunity for young rifts, rift-driven pole
-/// assignment) are being finished as part of the Voronoi v2 rework
-/// (docs/voronoi-v2.md). Ignored, not deleted: this is the acceptance bar.
-#[ignore = "breakup dynamics land with Voronoi v2; see doc comment"]
 #[test]
 fn supercontinent_breaks_up_during_drift() {
     let mut h = Harness::level(5);

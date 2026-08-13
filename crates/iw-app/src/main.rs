@@ -20,7 +20,7 @@ mod terrain;
 mod test_sphere;
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -116,6 +116,13 @@ struct Args {
     clouds: bool,
 }
 
+/// The pipeline's tessellation (docs/voronoi-v2.md): terrain-driven Voronoi
+/// cells at the config's budget, seeded from the genesis density.
+fn build_planet_mesh(cfg: &PlanetConfig) -> Mesh {
+    let density = iw_tectonics::genesis_density(cfg.seed, cfg.craton_count);
+    Mesh::build_voronoi(cfg.cell_budget, cfg.seed, &density)
+}
+
 /// Build the five real processes in the order the simulation requires. Mirrors
 /// `iw-headless`'s `build_processes` (tectonics, geology, climate, surface,
 /// biomes — see `Planet`'s field-ownership table).
@@ -165,8 +172,6 @@ struct Sim {
     store: Arc<SwitchableStore>,
     history: HistoryWriter,
     reader: Option<HistoryStore>,
-    /// Filled by the injected mesh builder when the worker rebuilds the mesh.
-    rebuilt_mesh: Arc<Mutex<Option<Arc<Mesh>>>>,
     /// Checkpoint tags on disk, refreshed periodically.
     completed: Vec<Phase>,
     last_checkpoint_scan: Instant,
@@ -363,12 +368,18 @@ impl App {
         let mesh = if self.args.test_sphere {
             log::info!("building icosphere test mesh (level {})", self.args.level);
             Arc::new(test_sphere::build(self.args.level))
+        } else if let Some(p) = loaded.as_ref().filter(|p| !p.mesh_generators.is_empty()) {
+            log::info!(
+                "rebuilding tessellation from the checkpoint's {} generators",
+                p.mesh_generators.len()
+            );
+            Arc::new(Mesh::build_from_generators(&p.mesh_generators))
         } else {
             log::info!(
-                "building Goldberg mesh (level {})",
-                self.config.subdivision_level
+                "building Voronoi tessellation ({} cell budget)",
+                self.config.cell_budget
             );
-            Arc::new(Mesh::build(self.config.subdivision_level))
+            Arc::new(build_planet_mesh(&self.config))
         };
         log::info!(
             "mesh: {} cells, {} chunks, {:.2?}",
@@ -423,17 +434,14 @@ impl App {
         let reader = HistoryStore::new(dir.clone(), config.history_cap_bytes).ok();
         let mesh = self.mesh.clone().expect("mesh built before the sim starts");
 
-        let rebuilt_mesh: Arc<Mutex<Option<Arc<Mesh>>>> = Arc::new(Mutex::new(None));
-        let slot = Arc::clone(&rebuilt_mesh);
-        let mesh_builder: iw_sim::MeshBuilder = Arc::new(move |level: u8| {
+        let mesh_builder: iw_sim::MeshBuilder = Arc::new(move |cfg: &PlanetConfig| {
             let t0 = Instant::now();
-            let m = Arc::new(Mesh::build(level));
+            let m = Arc::new(build_planet_mesh(cfg));
             log::info!(
-                "rebuilt mesh at level {level}: {} cells in {:.2?}",
+                "rebuilt tessellation: {} cells in {:.2?}",
                 m.n_cells(),
                 t0.elapsed()
             );
-            *slot.lock().unwrap() = Some(Arc::clone(&m));
             m
         });
 
@@ -458,23 +466,20 @@ impl App {
             handle.start();
         }
         log::info!(
-            "simulation: seed {} level {} -> {}",
+            "simulation: seed {} budget {} -> {}",
             config.seed,
-            config.subdivision_level,
+            config.cell_budget,
             dir.display()
         );
         self.log.push(format!(
-            "seed {} level {} ({} cells)",
-            config.seed,
-            config.subdivision_level,
-            config.n_cells()
+            "seed {} ({} cell budget)",
+            config.seed, config.cell_budget
         ));
         self.sim = Some(Sim {
             handle,
             store,
             history,
             reader,
-            rebuilt_mesh,
             completed: Vec::new(),
             last_checkpoint_scan: Instant::now() - Duration::from_secs(10),
             last_state: None,
@@ -491,9 +496,9 @@ impl App {
         };
         match rerun {
             Some(phase) => {
-                if config.subdivision_level != self.config.subdivision_level {
+                if config.cell_budget != self.config.cell_budget {
                     self.log
-                        .push("re-run needs the same subdivision level; regenerate instead".into());
+                        .push("re-run needs the same cell budget; regenerate instead".into());
                     return;
                 }
                 sim.handle.rerun_from_phase(phase, config.clone());
@@ -553,14 +558,15 @@ impl App {
         let Some(sim) = self.sim.as_ref() else {
             return Ok(());
         };
-        // A regenerate at a new level rebuilds the mesh on the worker thread;
-        // pick it up before touching any snapshot sized for it.
-        let rebuilt = sim.rebuilt_mesh.lock().unwrap().take();
-        if let Some(mesh) = rebuilt {
+        // The worker publishes a new mesh on regenerate, checkpoint resume,
+        // and era re-tessellation; pick it up before touching any snapshot
+        // sized for it.
+        if let Some(mesh) = sim.handle.take_new_mesh() {
             if let Some(renderer) = self.renderer.as_mut() {
                 renderer.upload_mesh(&mesh)?;
             }
             self.mesh = Some(mesh);
+            self.beauty_detail_cache = None;
             self.applied_version = 0;
         }
 

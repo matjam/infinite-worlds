@@ -118,6 +118,9 @@ const WELD_SPEED_M_YR: f64 = 0.008;
 /// a single superplate.
 const QUIET_MERGE_PITCHES: f64 = 12.0;
 const QUIET_MERGE_SPEED_M_YR: f64 = 0.002;
+/// Mean boundary age (younger side) below which a plate pair is weld-immune:
+/// it is an opening rift, not a dead boundary.
+const RIFT_WELD_IMMUNITY_MYR: f64 = 30.0;
 /// Area fraction beyond which any plate rifts on size alone.
 const GIANT_PLATE_AREA_FRAC: f64 = 0.40;
 
@@ -137,6 +140,10 @@ struct PairAcc {
     coll_len_m: f64,
     /// Integral of the closure rate over that part, m/yr * m.
     coll_conv_len: f64,
+    /// Integral of the younger side's crust age along the boundary, Myr * m.
+    /// A young mean age marks a fresh rift ocean: those pairs are weld-immune
+    /// so breakup fragments genuinely separate instead of being recaptured.
+    age_len: f64,
 }
 
 /// One Drift / Refinement / RecentPast step.
@@ -199,6 +206,8 @@ pub(crate) fn step(
             let acc = pairs.entry(key).or_default();
             acc.len_m += e.len_m as f64;
             acc.rel_len += e.len_m as f64 * e.rel.length() as f64;
+            let age = planet.crust_age_myr[e.a as usize].min(planet.crust_age_myr[e.b as usize]);
+            acc.age_len += e.len_m as f64 * age as f64;
         }
         match e.kind {
             Kind::Transform => {
@@ -873,6 +882,12 @@ fn weld_step(
     keys.sort_unstable();
     for key in keys {
         let acc = pairs[&key];
+        // A boundary whose younger side is fresh ridge crust is an OPENING
+        // rift: never weld or quiet-merge across it, or breakup fragments get
+        // recaptured before they can separate (the Pangaea acceptance test).
+        if acc.age_len / acc.len_m.max(1.0) < RIFT_WELD_IMMUNITY_MYR {
+            continue;
+        }
         let welded = acc.coll_len_m >= WELD_MIN_PITCHES * pitch_m
             && acc.coll_conv_len / acc.coll_len_m.max(1.0) < WELD_SPEED_M_YR;
         let quiet = acc.len_m >= QUIET_MERGE_PITCHES * pitch_m

@@ -86,6 +86,10 @@ pub struct Mesh {
     pub chunks: Vec<Chunk>,
     /// Chunk index of each cell.
     pub cell_chunk: Vec<u16>,
+    /// The f64 Voronoi generators this mesh was built from (empty for legacy
+    /// Goldberg/test meshes). Simulation state: checkpoints persist these and
+    /// [`Mesh::build_from_generators`] rebuilds the identical mesh.
+    pub generators: Vec<DVec3>,
 }
 
 impl Mesh {
@@ -218,6 +222,7 @@ impl Mesh {
             build_chunks(level, &centers, &corner_offsets, &corners, &vertices);
 
         Mesh {
+            generators: Vec::new(),
             level,
             centers,
             areas_km2,

@@ -154,6 +154,7 @@ impl Process for SurfaceProcess {
         }
 
         hydro.solve(planet, mesh, geom, melt_m_yr);
+        hydro.publish_flow_edges(planet, mesh);
         precipitate_evaporites(planet, &mut c, hydro);
 
         let k_mult = if full { 1.0 } else { REFINEMENT_K_MULT };

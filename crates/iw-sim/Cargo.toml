@@ -8,6 +8,7 @@ license.workspace = true
 iw-core.workspace = true
 iw-mesh.workspace = true
 glam.workspace = true
+rayon.workspace = true
 rand.workspace = true
 rand_pcg.workspace = true
 crossbeam-channel.workspace = true

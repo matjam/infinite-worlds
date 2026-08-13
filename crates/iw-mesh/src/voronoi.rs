@@ -217,6 +217,7 @@ pub fn build_from_generators(generators: &[DVec3]) -> Mesh {
     let cell_chunk: Vec<u16> = cell_chunk.iter().map(|c| remap[*c as usize]).collect();
 
     Mesh {
+        generators: generators.to_vec(),
         level: 0, // not a subdivision mesh; level is meaningless here
         centers: centers_f32,
         areas_km2,

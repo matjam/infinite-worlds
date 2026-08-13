@@ -32,8 +32,12 @@ impl Phase {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlanetConfig {
     pub seed: u64,
-    /// Goldberg subdivision level, 6..=10. Cells = 10 * 4^level + 2.
+    /// Legacy Goldberg subdivision level. Unit tests and comparison tooling
+    /// only — the pipeline tessellates by [`Self::cell_budget`].
     pub subdivision_level: u8,
+    /// Total Voronoi cell budget (docs/voronoi-v2.md): the fidelity knob.
+    /// Cell sizes are terrain-driven; this caps how many there are.
+    pub cell_budget: u32,
     /// [crustal formation, drift, refinement, recent past] durations in Myr.
     pub phase_durations_myr: [f64; 4],
     /// Timestep per phase in Myr.
@@ -60,6 +64,7 @@ impl Default for PlanetConfig {
         PlanetConfig {
             seed: 42,
             subdivision_level: 8,
+            cell_budget: 250_000,
             phase_durations_myr: [200.0, 200.0, 75.0, 2.0],
             phase_dt_myr: [1.0, 0.5, 0.25, 0.005],
             water_budget: 1.0,
@@ -109,6 +114,7 @@ impl PlanetConfig {
     /// Clamp all values into their sane UI ranges (DESIGN.md §9.1).
     pub fn sanitize(&mut self) {
         self.subdivision_level = self.subdivision_level.clamp(4, 10);
+        self.cell_budget = self.cell_budget.clamp(10_000, 3_000_000);
         for d in &mut self.phase_durations_myr {
             *d = d.clamp(0.0, 2000.0);
         }

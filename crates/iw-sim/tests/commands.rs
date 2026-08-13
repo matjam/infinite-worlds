@@ -34,9 +34,10 @@ fn processes() -> Vec<Box<dyn Process>> {
 }
 
 fn counting_mesh_builder(calls: Arc<AtomicUsize>) -> MeshBuilder {
-    Arc::new(move |level: u8| {
+    Arc::new(move |cfg: &iw_core::PlanetConfig| {
         calls.fetch_add(1, Ordering::SeqCst);
-        // Stand-in for `Mesh::build(level)`; cell count irrelevant here.
+        // Stand-in for a real tessellation; cell count irrelevant here.
+        let level = cfg.subdivision_level;
         let mesh = ring_mesh(6 + level as usize);
         Arc::new(Mesh {
             level,

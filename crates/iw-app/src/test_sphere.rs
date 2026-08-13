@@ -134,6 +134,7 @@ pub fn build(level: u8) -> Mesh {
     }
 
     Mesh {
+        generators: Vec::new(),
         level,
         centers,
         areas_km2,

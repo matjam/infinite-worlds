@@ -155,6 +155,7 @@ proptest! {
             craton_count,
             glacial_intensity,
             history_cap_bytes,
+            cell_budget: seed as u32,
         };
         config.sanitize();
 
