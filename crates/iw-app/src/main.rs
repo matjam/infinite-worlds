@@ -114,6 +114,10 @@ struct Args {
     /// Start with the procedural cloud layer on (default off, per DESIGN §9).
     #[arg(long)]
     clouds: bool,
+    /// Initial vertical exaggeration (1 = photographic; the HUD slider still
+    /// adjusts it live).
+    #[arg(long, default_value_t = 30.0)]
+    exaggeration: f32,
 }
 
 /// The pipeline's tessellation (docs/voronoi-v2.md): terrain-driven Voronoi
@@ -283,7 +287,7 @@ impl App {
             historic: None,
             layer: Layer::Beauty,
             scales: LayerScales::default(),
-            exaggeration: 30.0,
+            exaggeration: args.exaggeration.clamp(1.0, 200.0),
             sun: SunSettings::default(),
             clouds: args.clouds,
             clouds_refreshed: None,

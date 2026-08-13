@@ -112,20 +112,33 @@ pub fn convergence_rainout(lat_rad: f32) -> f32 {
         - g(SUBTROPICAL_PENALTY, SUBTROPICAL_DEG, SUBTROPICAL_WIDTH_DEG)
 }
 
-/// Number of advection sweeps and the width of one cell in reference (level 6)
-/// cells. Coarse meshes take fewer, longer sweeps so the distance moisture
-/// travels in kilometres is resolution-independent.
-fn sweep_schedule(level: u8) -> (usize, f32) {
-    let width = 2f32.powi(6i32 - level as i32);
-    let sweeps = (SWEEPS_REF / width).round().clamp(5.0, 40.0) as usize;
-    (sweeps, width)
+/// Reference cell area: a level-6 Goldberg cell (~12,450 km^2, ~112 km wide).
+/// All rainout constants are calibrated per one of these.
+const REF_CELL_AREA_KM2: f32 = 4.0 * std::f32::consts::PI * 6371.0 * 6371.0 / 40_962.0;
+
+/// Metric sweep schedule: how many hops moisture takes, and each CELL's width
+/// in reference-cell units, derived from actual cell areas — never from a
+/// subdivision level. On a terrain-sized Voronoi mesh (docs/voronoi-v2.md)
+/// cell widths span an order of magnitude, so the width is per-cell: a hop
+/// across a 15 km coastal cell must rain out ~1/7 of what a hop across a
+/// 112 km reference cell does, or every interior turns to desert the moment
+/// the mesh resolves fine coasts.
+fn sweep_schedule(mesh: &Mesh) -> (usize, Vec<f32>) {
+    let widths: Vec<f32> = mesh
+        .areas_km2
+        .iter()
+        .map(|a| (a / REF_CELL_AREA_KM2).sqrt().clamp(0.05, 8.0))
+        .collect();
+    let mean_width = widths.iter().sum::<f32>() / widths.len().max(1) as f32;
+    let sweeps = (SWEEPS_REF / mean_width).round().clamp(5.0, 96.0) as usize;
+    (sweeps, widths)
 }
 
 /// Recompute `planet.precip_mm_yr`. Requires `planet.temperature_c` to be
 /// current (this runs after the temperature pass).
 pub(crate) fn update(planet: &mut Planet, mesh: &Mesh, cache: &MeshCache) {
     let n = planet.n_cells();
-    let (sweeps, width) = sweep_schedule(mesh.level);
+    let (sweeps, widths) = sweep_schedule(mesh);
     let sea = planet.sea_level_m;
 
     // Land-surface height above sea level, including ice: the orographic term
@@ -169,7 +182,7 @@ pub(crate) fn update(planet: &mut Planet, mesh: &Mesh, cache: &MeshCache) {
             let oro = (lift / ORO_SCALE_M).min(ORO_MAX);
             let r_ref = (BASE_RAINOUT + oro + convergence_rainout(mesh.latlon[i][0]))
                 .clamp(RAINOUT_MIN, RAINOUT_MAX);
-            1.0 - (1.0 - r_ref).powf(width)
+            1.0 - (1.0 - r_ref).powf(widths[i])
         })
         .collect();
 
