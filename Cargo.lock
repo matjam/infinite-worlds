@@ -1488,6 +1488,7 @@ dependencies = [
  "log",
  "rand",
  "rand_pcg",
+ "rayon",
  "rustc-hash",
 ]
 

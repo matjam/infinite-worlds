@@ -60,7 +60,9 @@ impl Noise3 {
         let mut q = p;
         for oct in 0..octaves {
             let n = Noise3 {
-                seed: self.seed.wrapping_add((oct as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)),
+                seed: self
+                    .seed
+                    .wrapping_add((oct as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)),
             };
             sum += amp * n.sample(q);
             norm += amp;

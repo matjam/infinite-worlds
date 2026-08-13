@@ -14,7 +14,7 @@ use crate::geom::{omega_for_velocity, random_unit, reproject, tangent_toward};
 use crate::phase1;
 use crate::topology::{absorb_tiny_plates, compact_plates, enforce_contiguity};
 use crate::{
-    MeshCache, Scratch, MAX_CRUST_THICKNESS_M, MAX_PLATES, MIN_RIFTABLE_CELLS, OCEANIC_THICKNESS_M,
+    MeshCache, Scratch, MAX_CRUST_THICKNESS_M, MAX_PLATES, MIN_RIFTABLE_CELLS,
     RIFT_BREAKUP_THICKNESS_M, TRENCH_THICKNESS_M,
 };
 
@@ -323,7 +323,13 @@ pub(crate) fn step(
                     continue;
                 }
                 scratch.flags[renew as usize] = true;
-                make_fresh_oceanic(planet, renew, cache.area_m2[renew as usize], ctx.ledger);
+                make_fresh_oceanic(
+                    planet,
+                    renew,
+                    cache.ocean_thickness_m[renew as usize],
+                    cache.area_m2[renew as usize],
+                    ctx.ledger,
+                );
                 planet.tectonic_flags[renew as usize] |= cell_flags::RIFT;
             }
             Transfer::Subduct { s, ovr_plate, .. } => {
@@ -384,7 +390,7 @@ pub(crate) fn step(
         }
     }
 
-    relax_thickness(planet, dt_myr);
+    relax_thickness(planet, cache, dt_myr);
     breakup_stretched_crust(planet, cache, ctx);
     phase1::age_ocean(planet, dt_myr);
     hotspots(planet, mesh, cache, dt_myr, ctx);
@@ -486,7 +492,7 @@ fn arc_volcanism(
 }
 
 /// Flexural rebound of ocean floor and slow orogenic collapse of thick crust.
-fn relax_thickness(planet: &mut Planet, dt_myr: f64) {
+fn relax_thickness(planet: &mut Planet, cache: &MeshCache, dt_myr: f64) {
     let dt = dt_myr as f32;
     for c in 0..planet.n_cells() {
         let flexing = planet.tectonic_flags[c] & cell_flags::SUBDUCTING != 0;
@@ -494,7 +500,7 @@ fn relax_thickness(planet: &mut Planet, dt_myr: f64) {
         match planet.crust_type[c] {
             CrustType::Oceanic if !flexing => {
                 let w = (dt / OCEAN_RELAX_TAU_MYR).clamp(0.0, 1.0);
-                planet.crust_thickness_m[c] = th + (OCEANIC_THICKNESS_M - th) * w;
+                planet.crust_thickness_m[c] = th + (cache.ocean_thickness_m[c] - th) * w;
             }
             CrustType::Continental if th > CONTINENTAL_REST_M => {
                 let w = (dt / CONTINENTAL_RELAX_TAU_MYR).clamp(0.0, 1.0);
@@ -512,7 +518,13 @@ fn breakup_stretched_crust(planet: &mut Planet, cache: &MeshCache, ctx: &mut Ste
         if planet.crust_type[c as usize] == CrustType::Continental
             && planet.crust_thickness_m[c as usize] < RIFT_BREAKUP_THICKNESS_M
         {
-            make_fresh_oceanic(planet, c, cache.area_m2[c as usize], ctx.ledger);
+            make_fresh_oceanic(
+                planet,
+                c,
+                cache.ocean_thickness_m[c as usize],
+                cache.area_m2[c as usize],
+                ctx.ledger,
+            );
             planet.tectonic_flags[c as usize] |= cell_flags::RIFT;
         }
     }

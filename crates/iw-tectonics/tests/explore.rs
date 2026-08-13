@@ -128,3 +128,65 @@ fn level8_scaling() {
     );
     plates_are_partition(&h.planet, &h.mesh).expect("partition");
 }
+
+/// Dump an equirectangular PPM of the crust after CrustalFormation, so craton
+/// outlines and any rasterization banding can be inspected directly instead of
+/// through five more processes' worth of geology and erosion.
+///
+/// `IW_DUMP_LEVEL`, `IW_DUMP_SEED`, `IW_DUMP_STEPS` and `IW_DUMP_OUT` override
+/// the defaults.
+#[test]
+#[ignore = "diagnostic"]
+fn dump_phase1_crust() {
+    use std::io::Write;
+    use std::sync::Arc;
+
+    let env = |k: &str, d: u64| -> u64 {
+        std::env::var(k)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(d)
+    };
+    let level = env("IW_DUMP_LEVEL", 6) as u8;
+    let seed = env("IW_DUMP_SEED", 42);
+    let steps = env("IW_DUMP_STEPS", 200);
+    let out = std::env::var("IW_DUMP_OUT").unwrap_or_else(|_| "/tmp/phase1.ppm".into());
+
+    let mut config = test_config(level);
+    config.seed = seed;
+    let mut h = Harness::new(config, Arc::new(iw_mesh::Mesh::build(level)));
+    let mut p = TectonicsProcess::new();
+    h.run(&mut p, Phase::CrustalFormation, steps);
+
+    let (w, ht) = (2048usize, 1024usize);
+    let mut buf = vec![0u8; w * ht * 3];
+    for y in 0..ht {
+        let lat = (0.5 - (y as f32 + 0.5) / ht as f32) * std::f32::consts::PI;
+        for x in 0..w {
+            let lon = ((x as f32 + 0.5) / w as f32 - 0.5) * std::f32::consts::TAU;
+            let dir = glam::Vec3::new(lat.cos() * lon.cos(), lat.cos() * lon.sin(), lat.sin());
+            let c = h.mesh.cell_at(dir) as usize;
+            let t = h.planet.crust_thickness_m[c];
+            let rgb = if h.planet.crust_type[c] == CrustType::Continental {
+                // 28 km (drowned margin) -> 44 km (shield core).
+                let f = ((t - 28_000.0) / 16_000.0).clamp(0.0, 1.0);
+                [
+                    (60.0 + 195.0 * f) as u8,
+                    (110.0 + 100.0 * f) as u8,
+                    (50.0 + 90.0 * f) as u8,
+                ]
+            } else {
+                let f = ((t - 6_300.0) / 1_400.0).clamp(0.0, 1.0);
+                [0, (20.0 + 40.0 * f) as u8, (70.0 + 110.0 * f) as u8]
+            };
+            buf[(y * w + x) * 3..(y * w + x) * 3 + 3].copy_from_slice(&rgb);
+        }
+    }
+    let mut f = std::fs::File::create(&out).expect("create dump");
+    write!(f, "P6\n{w} {ht}\n255\n").unwrap();
+    f.write_all(&buf).unwrap();
+    println!(
+        "wrote {out}: level {level}, seed {seed}, {steps} steps, land {:.1}%",
+        100.0 * h.continental_cells() as f32 / h.planet.n_cells() as f32
+    );
+}

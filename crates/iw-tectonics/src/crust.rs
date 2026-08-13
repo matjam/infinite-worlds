@@ -10,7 +10,7 @@
 
 use iw_core::{CrustType, MassLedger, Planet, RockType};
 
-use crate::{CONTINENTAL_DENSITY_KG_M3, OCEANIC_DENSITY_KG_M3, OCEANIC_THICKNESS_M};
+use crate::{CONTINENTAL_DENSITY_KG_M3, OCEANIC_DENSITY_KG_M3};
 
 /// Gabbro fraction of a fresh oceanic column (lower crust), metres.
 const OCEAN_GABBRO_M: f32 = 5_000.0;
@@ -55,15 +55,21 @@ pub(crate) fn deposit_new(
 /// Reset a cell to pristine age-0 oceanic crust with a basalt-over-gabbro
 /// column. Used at ridges, at breakup of over-stretched continental crust, and
 /// for the global proto-crust at the very start of the run.
+///
+/// `thickness_m` is the cell's reference sea-floor thickness
+/// (`MeshCache::ocean_thickness_m`), not the bare constant: the reference
+/// carries a low-amplitude noise field so the abyssal plains are not a
+/// perfectly flat sheet.
 pub(crate) fn make_fresh_oceanic(
     planet: &mut Planet,
     cell: u32,
+    thickness_m: f32,
     area_m2: f64,
     ledger: &mut MassLedger,
 ) {
     destroy_column(planet, cell, area_m2, ledger);
     planet.crust_type[cell as usize] = CrustType::Oceanic;
-    planet.crust_thickness_m[cell as usize] = OCEANIC_THICKNESS_M;
+    planet.crust_thickness_m[cell as usize] = thickness_m;
     planet.crust_density_kg_m3[cell as usize] = OCEANIC_DENSITY_KG_M3;
     planet.crust_age_myr[cell as usize] = 0.0;
     deposit_new(

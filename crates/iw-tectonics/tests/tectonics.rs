@@ -69,7 +69,10 @@ fn cratons_are_seeded_spaced_and_thick() {
         // 45 km floats at +2.6 km (a plateau, not a shield) and 35 km is
         // exactly the +800 m anchor, so the old edge value left every craton
         // dry to its outermost cell and the planet had no continental shelf.
-        assert!((31_000.0..=40_000.0).contains(&t), "craton thickness {t}");
+        // Widened by the craton interior texture: the radial profile is now
+        // modulated by +-10% of fBm so shields are not billiard-smooth, which
+        // takes the extremes to 27.9-44.0 km.
+        assert!((27_900.0..=44_000.0).contains(&t), "craton thickness {t}");
         assert_eq!(h.planet.crust_density_kg_m3[c as usize], 2_700.0);
         assert!(
             !h.planet.columns.col(c).is_empty(),
@@ -86,7 +89,12 @@ fn cratons_are_seeded_spaced_and_thick() {
     // Ocean floor is thin, dense, basaltic.
     for c in 0..h.planet.n_cells() as u32 {
         if h.planet.crust_type[c as usize] == CrustType::Oceanic {
-            assert_eq!(h.planet.crust_thickness_m[c as usize], 7_000.0);
+            // Fresh sea floor is the 7 km reference plus a fixed low-amplitude
+            // noise field (`OCEANIC_THICKNESS_NOISE_M`), so that the abyssal
+            // plains are not a perfectly uniform sheet; it is only ~50 m of
+            // isostatic relief.
+            let ot = h.planet.crust_thickness_m[c as usize];
+            assert!((6_450.0..=7_550.0).contains(&ot), "ocean thickness {ot}");
             assert_eq!(h.planet.columns.top_rock(c), Some(RockType::Basalt));
         }
     }
@@ -116,6 +124,27 @@ fn cratons_drift_and_accrete() {
 }
 
 // --- Phase 1 -> Drift hand-off ---
+
+/// The hand-off lays a sparse network of inherited weakness (`SUTURE`) along
+/// the creases of a ridged noise field, so later rifts have something to follow
+/// besides the seams where cratons happened to collide.
+#[test]
+fn handoff_marks_inherited_weakness() {
+    let mut h = Harness::level(5);
+    let mut p = TectonicsProcess::new();
+    h.run_crustal_formation(&mut p);
+    let seams = h.flagged(cell_flags::SUTURE);
+    h.run(&mut p, Phase::Drift, 1);
+    let after = h.flagged(cell_flags::SUTURE);
+    // The overlay flags exactly 3% of cells (a rank threshold, not a value
+    // threshold); the increment comes out a little under that because some of
+    // those cells already sit on a collision seam.
+    let added = (after - seams) as f32 / h.planet.n_cells() as f32;
+    assert!(
+        (0.015..0.031).contains(&added),
+        "weakness overlay added {added} of the planet ({seams} -> {after})"
+    );
+}
 
 #[test]
 fn handoff_partitions_the_whole_planet() {

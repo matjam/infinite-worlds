@@ -4,7 +4,8 @@
 //! Every routine iterates cells in index order and neighbours in mesh order,
 //! so results never depend on hash or thread ordering.
 
-use std::collections::VecDeque;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, VecDeque};
 
 use iw_core::{Planet, Plate};
 use iw_mesh::Mesh;
@@ -269,24 +270,37 @@ pub(crate) fn absorb_tiny_plates(planet: &mut Planet, mesh: &Mesh, min_cells: us
     changed
 }
 
-/// Multi-source BFS over the cell graph. `label[c] == u16::MAX` marks a cell
+/// Multi-source Dijkstra over the cell graph with a per-cell traversal cost:
+/// a graph Voronoi under a warped metric. `label[c] == u16::MAX` marks a cell
 /// still to be claimed; every other cell seeds the frontier with its label.
+/// (This replaced a plain hop-count BFS flood: unit costs made every boundary a
+/// great-circle bisector.)
 ///
-/// Seeds are enqueued in cell index order and neighbours in mesh order, so the
-/// resulting regions are a deterministic graph Voronoi diagram.
-pub(crate) fn flood_labels(mesh: &Mesh, label: &mut [u16]) {
-    let mut queue: VecDeque<u32> = VecDeque::new();
+/// Determinism: the frontier is ordered by `(distance bits, cell index)`, and
+/// costs are positive, so IEEE-754 bit order *is* numeric order and ties break
+/// on cell index. No hash or thread ordering is involved.
+pub(crate) fn flood_labels_warped(mesh: &Mesh, label: &mut [u16], cost: &[f32]) {
+    let n = label.len();
+    let mut dist = vec![f32::INFINITY; n];
+    let mut heap: BinaryHeap<Reverse<(u32, u32)>> = BinaryHeap::new();
     for (c, l) in label.iter().enumerate() {
         if *l != u16::MAX {
-            queue.push_back(c as u32);
+            dist[c] = 0.0;
+            heap.push(Reverse((0, c as u32)));
         }
     }
-    while let Some(c) = queue.pop_front() {
+    while let Some(Reverse((bits, c))) = heap.pop() {
+        let d = f32::from_bits(bits);
+        if d > dist[c as usize] {
+            continue; // stale frontier entry
+        }
         let l = label[c as usize];
         for &m in mesh.neighbors_of(c) {
-            if label[m as usize] == u16::MAX {
+            let nd = d + cost[m as usize].max(0.0);
+            if nd < dist[m as usize] {
+                dist[m as usize] = nd;
                 label[m as usize] = l;
-                queue.push_back(m);
+                heap.push(Reverse((nd.to_bits(), m)));
             }
         }
     }

@@ -1,43 +1,31 @@
 //! Phase 1: craton seeding, drift, accretion, and the hand-off partition into
 //! the initial plate set (DESIGN.md §5 Phase 1).
 //!
-//! Cratons are continental discs. Their *shape* (radius, lobe wobble) is a pure
-//! function of `(seed, craton index)` so it can be recomputed at any time; their
+//! Cratons are continental nuclei whose outline comes from 3D noise (see
+//! [`crate::craton`]). Their *shape* is a pure function of
+//! `(seed, craton index, mesh pitch)` so it can be recomputed at any time; their
 //! *position* is recomputed from the cells they currently own. Nothing about a
 //! craton is stored outside `Planet`, which is what lets a fresh process
 //! instance continue a checkpoint exactly.
 
-use std::collections::VecDeque;
-
 use glam::{DVec3, Vec3};
+use iw_core::noise::Noise3;
 use iw_core::planet::cell_flags;
 use iw_core::{rng_for, CrustType, Phase, Planet, Plate, StepCtx};
 use iw_mesh::{Mesh, EARTH_RADIUS_M};
 use rand::Rng;
+use rayon::prelude::*;
 
+use crate::craton::{CratonSet, CratonShape};
 use crate::crust::{make_continental, make_fresh_oceanic};
 use crate::geom::{arc_m, omega_for_velocity, random_unit, rotate_about, tangent_toward};
 use crate::topology::{
-    bfs_distance, compact_plates, enforce_contiguity, flood_labels, UnionFind, UNASSIGNED,
+    bfs_distance, compact_plates, enforce_contiguity, flood_labels_warped, UnionFind, UNASSIGNED,
 };
 use crate::{
-    MeshCache, Scratch, AGE_DENSITY_COEFF, CRATON_CORE_THICKNESS_M, CRATON_EDGE_THICKNESS_M,
-    OCEANIC_DENSITY_KG_M3, OCEANIC_DENSITY_MAX_KG_M3,
+    MeshCache, Scratch, AGE_DENSITY_COEFF, OCEANIC_DENSITY_KG_M3, OCEANIC_DENSITY_MAX_KG_M3,
 };
 
-/// Fraction of the planet the craton nuclei are sized to cover in total.
-///
-/// Earth's continental crust, shelves included, is a little under 40%, of which
-/// ~29% of the globe stands above water. Calibration: 0.26 was too little. It
-/// gave a 26% continental planet whose *entire* continental area was dry land
-/// (nothing to flood into shelves) and, worse, left 74% of the planet as deep
-/// basin, so the fixed water budget had to pool 3.5 km deep and dragged sea
-/// level a kilometre below the geoid. 0.37 leaves room for arc growth to reach
-/// Earth's ~40% and produces ~30% land with a real drowned margin around it —
-/// at 0.34 the drowned margin ate the gain and land came out under 25%.
-const CONTINENTAL_TARGET_FRACTION: f64 = 0.37;
-/// Per-craton area spread about the mean, as a multiplier.
-const CRATON_AREA_SPREAD: (f64, f64) = (0.65, 1.35);
 /// Poisson-disc rejection distance as a multiple of the two radii summed.
 const SEPARATION_FACTOR: f64 = 1.02;
 /// Floor the rejection distance relaxes to when the sphere gets crowded.
@@ -61,64 +49,29 @@ const TARGET_PLATES_MIN: usize = 5;
 const TARGET_PLATES_MAX: usize = 8;
 /// Speed given to the ocean plates invented at the hand-off, m/yr.
 const SEED_PLATE_SPEED_M_YR: f32 = 0.04;
-
-/// Deterministic per-craton shape, derived from `(seed, index)` alone: a mean
-/// radius modulated by three odd
-/// harmonics of azimuth. Calibration: with the original 3/5 harmonics at
-/// 0.06-0.18 / 0.03-0.10 the outline stayed visibly circular at level 6 — a
-/// craton is only ~15 cells across, so a 12% wobble is under two cells of
-/// deviation and the coastlines read as discs. The amplitudes are roughly
-/// doubled and a 7th harmonic added, which puts the peak deviation at 4-6 cells
-/// and gives promontories and embayments at continent scale.
-struct CratonShape {
-    radius_m: f64,
-    /// Reference direction fixing the azimuth zero of the lobe pattern.
-    ref_axis: Vec3,
-    lobe3: f32,
-    lobe5: f32,
-    lobe7: f32,
-    phase3: f32,
-    phase5: f32,
-    phase7: f32,
-}
-
-impl CratonShape {
-    /// Radius at azimuth `phi` (radians) in the craton's own frame.
-    fn radius_at(&self, phi: f32) -> f64 {
-        let w = 1.0
-            + self.lobe3 * (3.0 * phi + self.phase3).sin()
-            + self.lobe5 * (5.0 * phi + self.phase5).sin()
-            + self.lobe7 * (7.0 * phi + self.phase7).sin();
-        self.radius_m * w.clamp(0.55, 1.45) as f64
-    }
-}
-
-/// Craton shapes for a planet. Uses its own RNG stream so the values can be
-/// regenerated at any step without disturbing the per-step stream.
-fn craton_shapes(seed: u64, count: usize) -> Vec<CratonShape> {
-    let mut rng = rng_for(seed, "tectonics/craton-shape", 0);
-    (0..count)
-        .map(|_| CratonShape {
-            radius_m: cap_radius_m(
-                CONTINENTAL_TARGET_FRACTION / count.max(1) as f64
-                    * rng.random_range(CRATON_AREA_SPREAD.0..CRATON_AREA_SPREAD.1),
-            ),
-            ref_axis: random_unit(&mut rng),
-            lobe3: rng.random_range(0.10f32..0.26),
-            lobe5: rng.random_range(0.06f32..0.16),
-            lobe7: rng.random_range(0.04f32..0.10),
-            phase3: rng.random_range(0.0f32..std::f32::consts::TAU),
-            phase5: rng.random_range(0.0f32..std::f32::consts::TAU),
-            phase7: rng.random_range(0.0f32..std::f32::consts::TAU),
-        })
-        .collect()
-}
-
-/// Great-circle radius of a spherical cap covering `fraction` of the sphere.
-fn cap_radius_m(fraction: f64) -> f64 {
-    let cos_theta = (1.0 - 2.0 * fraction).clamp(-0.99, 1.0);
-    cos_theta.acos() * EARTH_RADIUS_M
-}
+/// Rate at which a craton cell's thickness relaxes onto the craton's radial
+/// profile, per Myr (tau = 25 Myr).
+///
+/// Without this, thickness is only ever written at the instant a cell is
+/// claimed, so every cell of a drifting craton keeps the *leading-edge* value
+/// it was born with and the whole landmass ends up uniformly thin — the
+/// core-to-edge profile only ever existed for cratons that never moved. Letting
+/// it relax makes the profile travel with the craton and also erases any
+/// residual edge-flicker banding.
+const PROFILE_RATE_PER_MYR: f64 = 0.04;
+/// Distance-metric warp for the hand-off Voronoi, as a fraction of the base
+/// cost. Straight great-circle plate boundaries are the tell-tale of a Voronoi
+/// partition; a noisy metric makes them meander.
+const PARTITION_WARP: f32 = 0.45;
+/// Frequency of that warp field on the unit sphere.
+const PARTITION_WARP_FREQ: f32 = 3.0;
+/// Fraction of cells flagged as inherited weakness (proto-sutures) at the
+/// hand-off, so later rifting can follow noise creases and not only the seams
+/// where cratons actually collided.
+const WEAKNESS_FRACTION: f32 = 0.03;
+/// Frequency of the ridged field those creases are drawn from.
+const WEAKNESS_FREQ: f32 = 3.5;
+const WEAKNESS_OCTAVES: u32 = 4;
 
 /// Minimum great-circle separation, in metres, that the craton seeder enforces
 /// between any two craton centres for this `(seed, count)`.
@@ -126,11 +79,11 @@ fn cap_radius_m(fraction: f64) -> f64 {
 /// Exposed so tests (and tuning UIs) can check spacing without duplicating the
 /// sampling constants.
 pub fn craton_min_separation_m(seed: u64, count: u32) -> f64 {
-    let shapes = craton_shapes(seed, count as usize);
+    let radii = CratonSet::radii_m(seed, count as usize);
     let mut min = f64::INFINITY;
-    for i in 0..shapes.len() {
-        for j in i + 1..shapes.len() {
-            min = min.min((shapes[i].radius_m + shapes[j].radius_m) * SEPARATION_FLOOR);
+    for i in 0..radii.len() {
+        for j in i + 1..radii.len() {
+            min = min.min((radii[i] + radii[j]) * SEPARATION_FLOOR);
         }
     }
     if min.is_finite() {
@@ -147,16 +100,17 @@ pub(crate) fn step(
     dt_myr: f64,
     ctx: &mut StepCtx,
     cache: &MeshCache,
+    cratons: &CratonSet,
     scratch: &mut Scratch,
 ) {
-    let shapes = craton_shapes(planet.config.seed, planet.config.craton_count as usize);
+    let shapes = cratons.shapes();
     let centers = if planet.plates.is_empty() {
-        seed_planet(planet, ctx, cache, &shapes)
+        seed_planet(planet, ctx, cache, shapes)
     } else {
         advect(planet, mesh, dt_myr, ctx)
     };
 
-    rasterize_and_apply(planet, mesh, cache, ctx, &shapes, &centers, scratch);
+    rasterize_and_apply(planet, mesh, cache, ctx, shapes, &centers, dt_myr, scratch);
     age_ocean(planet, dt_myr);
     weld_contacts(planet, mesh, ctx);
 }
@@ -171,7 +125,13 @@ fn seed_planet(
 ) -> Vec<Vec3> {
     for c in 0..planet.n_cells() as u32 {
         planet.plate_id[c as usize] = UNASSIGNED;
-        make_fresh_oceanic(planet, c, cache.area_m2[c as usize], ctx.ledger);
+        make_fresh_oceanic(
+            planet,
+            c,
+            cache.ocean_thickness_m[c as usize],
+            cache.area_m2[c as usize],
+            ctx.ledger,
+        );
     }
 
     // Poisson-disc rejection sampling. Cratons sized for a quarter of the
@@ -323,8 +283,14 @@ fn advect(planet: &mut Planet, mesh: &Mesh, dt_myr: f64, ctx: &mut StepCtx) -> V
         .collect()
 }
 
-/// Stamp the craton discs onto the mesh and reconcile with the previous step:
+/// Stamp the craton shapes onto the mesh and reconcile with the previous step:
 /// leading-edge cells become continental, trailing-edge cells revert to ocean.
+///
+/// The test is done in each craton's own frame (see [`crate::craton`]), which
+/// is what makes the outline rigid under drift. It is a pure per-cell map —
+/// each cell asks every craton whose bounding cone it falls in, lowest index
+/// wins — so it parallelizes without any order dependence.
+#[allow(clippy::too_many_arguments)]
 fn rasterize_and_apply(
     planet: &mut Planet,
     mesh: &Mesh,
@@ -332,91 +298,93 @@ fn rasterize_and_apply(
     ctx: &mut StepCtx,
     shapes: &[CratonShape],
     centers: &[Vec3],
+    dt_myr: f64,
     scratch: &mut Scratch,
 ) {
     let n = planet.n_cells();
+
+    // Per-craton placement: local frame, cap pole in world space, cull cone.
+    struct Placed<'a> {
+        k: u16,
+        shape: &'a CratonShape,
+        frame: glam::Quat,
+        pole: Vec3,
+        cos_bound: f32,
+    }
+    let placed: Vec<Placed> = centers
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| c.length_squared() >= 0.5) // Vec3::ZERO == extinct
+        .map(|(k, center)| {
+            let shape = &shapes[k.min(shapes.len() - 1)];
+            let frame = shape.frame(*center);
+            Placed {
+                k: k as u16,
+                shape,
+                frame,
+                pole: shape.pole_world(frame),
+                cos_bound: shape.cos_bound(),
+            }
+        })
+        .collect();
+
     // scratch.u16a: craton claiming each cell (UNASSIGNED = ocean).
-    // scratch.f32a: normalized distance from the claiming craton's centre.
-    scratch.u16a.fill(UNASSIGNED);
-    scratch.f32a.fill(0.0);
-
-    let mut queue: VecDeque<u32> = VecDeque::new();
-    for (k, center) in centers.iter().enumerate() {
-        if center.length_squared() < 0.5 {
-            continue; // extinct craton
-        }
-        let shape = &shapes[k.min(shapes.len() - 1)];
-        // Body frame for the lobe pattern.
-        let t = {
-            let a = shape.ref_axis - *center * center.dot(shape.ref_axis);
-            if a.length_squared() > 1e-10 {
-                a.normalize()
-            } else {
-                crate::geom::any_tangent(*center)
-            }
-        };
-        let b = center.cross(t);
-        let cos_bound = (1.4 * shape.radius_m / EARTH_RADIUS_M).cos();
-
-        let start = mesh.cell_at(*center);
-        queue.clear();
-        queue.push_back(start);
-        scratch.flags[start as usize] = true;
-        scratch.cells.clear();
-        while let Some(c) = queue.pop_front() {
-            scratch.cells.push(c);
-            let cc = mesh.centers[c as usize];
-            if cc.dot(*center) as f64 <= cos_bound {
-                continue;
-            }
-            for &m in mesh.neighbors_of(c) {
-                if !scratch.flags[m as usize] {
-                    scratch.flags[m as usize] = true;
-                    queue.push_back(m);
+    // scratch.f32a: that craton's target crustal thickness there, metres.
+    scratch
+        .u16a
+        .par_iter_mut()
+        .zip(scratch.f32a.par_iter_mut())
+        .zip(mesh.centers.par_iter())
+        .for_each(|((claim, thickness), cc)| {
+            *claim = UNASSIGNED;
+            *thickness = 0.0;
+            for p in &placed {
+                if cc.dot(p.pole) < p.cos_bound {
+                    continue;
+                }
+                let q = p.frame * *cc;
+                if let Some(f) = p.shape.contains(q) {
+                    *claim = p.k;
+                    *thickness = p.shape.thickness_m(q, f);
+                    return;
                 }
             }
-        }
-        for &c in &scratch.cells {
-            let cc = mesh.centers[c as usize];
-            let d = cc - *center * center.dot(cc);
-            let phi = if d.length_squared() > 1e-12 {
-                d.dot(b).atan2(d.dot(t))
-            } else {
-                0.0
-            };
-            let r_eff = shape.radius_at(phi);
-            let dist = arc_m(*center, cc);
-            if dist <= r_eff && scratch.u16a[c as usize] == UNASSIGNED {
-                scratch.u16a[c as usize] = k as u16;
-                scratch.f32a[c as usize] = (dist / r_eff) as f32;
-            }
-        }
-        // The centre cell always belongs to its craton.
-        if scratch.u16a[start as usize] == UNASSIGNED {
-            scratch.u16a[start as usize] = k as u16;
-            scratch.f32a[start as usize] = 0.0;
-        }
-        for &c in &scratch.cells {
-            scratch.flags[c as usize] = false;
+        });
+
+    // A craton always keeps the cell under its pole, however the noise fell.
+    for p in &placed {
+        let c = mesh.cell_at(p.pole) as usize;
+        if scratch.u16a[c] == UNASSIGNED {
+            scratch.u16a[c] = p.k;
+            scratch.f32a[c] = p.shape.thickness_m(p.frame * mesh.centers[c], 0.0);
         }
     }
 
+    let profile_w = (PROFILE_RATE_PER_MYR * dt_myr).clamp(0.0, 1.0) as f32;
     for c in 0..n as u32 {
         let claim = scratch.u16a[c as usize];
         let was_continental = planet.crust_type[c as usize] == CrustType::Continental;
         let area = cache.area_m2[c as usize];
         if claim != UNASSIGNED {
             planet.plate_id[c as usize] = claim;
+            let target = scratch.f32a[c as usize];
             if !was_continental {
-                let f = scratch.f32a[c as usize];
-                let thickness = CRATON_CORE_THICKNESS_M
-                    - (CRATON_CORE_THICKNESS_M - CRATON_EDGE_THICKNESS_M) * f * f;
-                make_continental(planet, c, thickness, area, ctx.ledger);
+                make_continental(planet, c, target, area, ctx.ledger);
+            } else {
+                // Relax onto the profile so it drifts with the craton.
+                let th = planet.crust_thickness_m[c as usize];
+                planet.crust_thickness_m[c as usize] = th + (target - th) * profile_w;
             }
         } else {
             planet.plate_id[c as usize] = UNASSIGNED;
             if was_continental {
-                make_fresh_oceanic(planet, c, area, ctx.ledger);
+                make_fresh_oceanic(
+                    planet,
+                    c,
+                    cache.ocean_thickness_m[c as usize],
+                    area,
+                    ctx.ledger,
+                );
             }
         }
     }
@@ -653,7 +621,16 @@ pub(crate) fn partition_into_plates(
     for (i, &s) in extra_seeds.iter().enumerate() {
         scratch.u16a[s as usize] = (n_clusters + i) as u16;
     }
-    flood_labels(mesh, &mut scratch.u16a);
+    // Noise-warped graph Voronoi: cheap-to-cross cells pull a plate's territory
+    // out along the noise's low ridges, so the initial boundaries wander the way
+    // real ones do instead of running as clean great-circle bisectors.
+    let warp = Noise3::new(noise_seed(planet.config.seed, "tectonics/plate-warp"));
+    let cost: Vec<f32> = mesh
+        .centers
+        .par_iter()
+        .map(|d| (1.0 + PARTITION_WARP * warp.fbm(*d * PARTITION_WARP_FREQ, 4, 2.0, 0.5)).max(0.2))
+        .collect();
+    flood_labels_warped(mesh, &mut scratch.u16a, &cost);
     debug_assert!(scratch.u16a.iter().all(|l| *l != u16::MAX));
 
     // Build the plate table.
@@ -698,6 +675,7 @@ pub(crate) fn partition_into_plates(
         crate::MAX_PLATES,
     );
     compact_plates(planet);
+    mark_inherited_weakness(planet, mesh);
 
     ctx.progress
         .event(iw_core::ProgressEvent::Milestone(format!(
@@ -705,4 +683,38 @@ pub(crate) fn partition_into_plates(
             planet.plates.len()
         )));
     log::debug!("initial partition: {} plates", planet.plates.len());
+}
+
+/// Lay a sparse network of proto-sutures along the creases of a ridged noise
+/// field. `SUTURE` is the only flag that survives a step, and `drift::split_plate`
+/// prefers to nucleate rifts on it, so this is how a planet inherits weakness
+/// from its accretion history rather than only from the seams where cratons
+/// happened to collide. The threshold is a rank, not a value, so the flagged
+/// fraction is exactly [`WEAKNESS_FRACTION`] whatever the field's distribution.
+fn mark_inherited_weakness(planet: &mut Planet, mesh: &Mesh) {
+    let n = planet.n_cells();
+    if n == 0 {
+        return;
+    }
+    let noise = Noise3::new(noise_seed(planet.config.seed, "tectonics/weakness"));
+    let field: Vec<f32> = mesh
+        .centers
+        .par_iter()
+        .map(|d| noise.ridged(*d * WEAKNESS_FREQ, WEAKNESS_OCTAVES, 2.0, 0.5))
+        .collect();
+    let mut sorted = field.clone();
+    sorted.sort_unstable_by(f32::total_cmp);
+    let idx = (((1.0 - WEAKNESS_FRACTION) * n as f32) as usize).min(n - 1);
+    let threshold = sorted[idx];
+    for (c, v) in field.iter().enumerate() {
+        if *v >= threshold {
+            planet.tectonic_flags[c] |= cell_flags::SUTURE;
+        }
+    }
+}
+
+/// Stable per-purpose noise seed, derived the same way every other stream in
+/// the crate is: from the planet seed and a fixed label.
+pub(crate) fn noise_seed(seed: u64, label: &str) -> u64 {
+    rng_for(seed, label, 0).random::<u64>()
 }

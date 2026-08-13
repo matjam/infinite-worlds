@@ -11,14 +11,25 @@
 //!
 //! # Model
 //!
-//! **CrustalFormation.** `config.craton_count` continental discs are seeded by
-//! Poisson-disc rejection sampling. Each craton is its own plate with an Euler
-//! pole that random-walks slowly; a supercontinent attractor switches on for the
-//! last quarter of the phase. Cratons are advected by *reassignment*: the disc
-//! centre is rotated analytically each step and the disc is re-rasterized, so
-//! cells at the leading edge become continental and cells at the trailing edge
-//! revert to ocean. Touching cratons weld (union-find) and thereafter move
-//! rigidly together, leaving `SUTURE` flags on the contact line.
+//! **CrustalFormation.** `config.craton_count` continental nuclei are seeded by
+//! Poisson-disc rejection sampling. A craton's outline is a spherical cap
+//! deformed by 3D fBm — domain-warped, then radius-modulated — so coastlines are
+//! fractal from continent scale down to cell scale and no two cratons look
+//! alike; its crustal thickness is a core-to-edge profile with fBm texture (see
+//! [`craton`]). Each craton is its own plate with an Euler pole that
+//! random-walks slowly; a supercontinent attractor switches on for the last
+//! quarter of the phase. Cratons are advected by *reassignment*: the centre is
+//! rotated analytically each step and the shape is re-rasterized **in the
+//! craton's own frame**, so the outline is rigid under drift — cells at the
+//! leading edge become continental and cells at the trailing edge revert to
+//! ocean, without the boundary breathing in and out. Touching cratons weld
+//! (union-find) and thereafter move rigidly together, leaving `SUTURE` flags on
+//! the contact line.
+//!
+//! **Hand-off.** The initial plate partition is a graph Voronoi under a
+//! noise-warped metric, so plate boundaries meander instead of running as
+//! great-circle bisectors, and a sparse ridged-noise crease network is flagged
+//! `SUTURE` so later rifting has inherited weakness to follow.
 //!
 //! **Drift / Refinement / RecentPast.** Plates are rigid caps rotating about
 //! Euler poles updated each step from slab pull, ridge push, collision
@@ -43,10 +54,13 @@
 
 #![warn(missing_docs)]
 
+use iw_core::noise::Noise3;
 use iw_core::{Phase, Planet, Process, StepCtx};
 use iw_mesh::Mesh;
+use rayon::prelude::*;
 
 mod boundary;
+mod craton;
 mod crust;
 mod drift;
 mod geom;
@@ -59,6 +73,14 @@ pub use phase1::craton_min_separation_m;
 
 /// Reference oceanic crust thickness, metres.
 pub const OCEANIC_THICKNESS_M: f32 = 7_000.0;
+/// Peak departure from that reference, metres. A fixed low-frequency noise
+/// field keeps the sea floor from being a perfectly uniform sheet: at oceanic
+/// density this is only ~50 m of isostatic relief, so it textures the abyssal
+/// plains without competing with real bathymetry.
+pub const OCEANIC_THICKNESS_NOISE_M: f32 = 550.0;
+/// Frequency of that field on the unit sphere (~2,000 km features).
+const OCEANIC_NOISE_FREQ: f32 = 5.0;
+const OCEANIC_NOISE_OCTAVES: u32 = 5;
 /// Density of newly formed oceanic crust, kg/m^3.
 pub const OCEANIC_DENSITY_KG_M3: f32 = 3_000.0;
 /// Density ceiling for old, cold oceanic crust, kg/m^3.
@@ -99,6 +121,7 @@ pub const MAX_PLATES: usize = 16;
 /// struct holds only mesh-derived caches and scratch buffers.
 pub struct TectonicsProcess {
     cache: Option<MeshCache>,
+    cratons: Option<craton::CratonSet>,
     scratch: Scratch,
 }
 
@@ -113,30 +136,51 @@ impl TectonicsProcess {
     pub fn new() -> TectonicsProcess {
         TectonicsProcess {
             cache: None,
+            cratons: None,
             scratch: Scratch::default(),
         }
     }
 }
 
-/// Quantities derived from the mesh alone; rebuilt when the mesh changes.
+/// Quantities derived from the mesh and the planet seed; rebuilt when either
+/// changes. Nothing here is simulation *state* — every field is a pure function
+/// of `(mesh, seed)`, so rebuilding it in a fresh process instance is exact.
 pub(crate) struct MeshCache {
     pub(crate) n_cells: usize,
+    /// Seed the seed-dependent fields below were built for.
+    pub(crate) seed: u64,
     /// Mean centre-to-centre cell spacing, metres.
     pub(crate) pitch_m: f64,
     /// Per-cell area in m^2 (for mass accounting).
     pub(crate) area_m2: Vec<f64>,
     /// Total planet surface area, m^2.
     pub(crate) total_area_m2: f64,
+    /// Reference thickness of fresh oceanic crust per cell, metres: the
+    /// constant plus a fixed noise field. New sea floor is created at this
+    /// thickness and old sea floor relaxes back to it.
+    pub(crate) ocean_thickness_m: Vec<f32>,
 }
 
 impl MeshCache {
-    fn build(mesh: &Mesh) -> MeshCache {
+    fn build(mesh: &Mesh, seed: u64) -> MeshCache {
         let area_m2: Vec<f64> = mesh.areas_km2.iter().map(|a| *a as f64 * 1.0e6).collect();
+        let noise = Noise3::new(phase1::noise_seed(seed, "tectonics/ocean-floor"));
+        let ocean_thickness_m = mesh
+            .centers
+            .par_iter()
+            .map(|d| {
+                OCEANIC_THICKNESS_M
+                    + OCEANIC_THICKNESS_NOISE_M
+                        * noise.fbm(*d * OCEANIC_NOISE_FREQ, OCEANIC_NOISE_OCTAVES, 2.0, 0.5)
+            })
+            .collect();
         MeshCache {
             n_cells: mesh.n_cells(),
+            seed,
             pitch_m: geom::cell_pitch_m(mesh),
             total_area_m2: area_m2.iter().sum(),
             area_m2,
+            ocean_thickness_m,
         }
     }
 }
@@ -182,12 +226,13 @@ impl Process for TectonicsProcess {
             mesh.n_cells(),
             "planet/mesh cell count mismatch"
         );
+        let seed = planet.config.seed;
         if self
             .cache
             .as_ref()
-            .is_none_or(|c| c.n_cells != mesh.n_cells())
+            .is_none_or(|c| c.n_cells != mesh.n_cells() || c.seed != seed)
         {
-            self.cache = Some(MeshCache::build(mesh));
+            self.cache = Some(MeshCache::build(mesh, seed));
         }
         let cache = self.cache.as_ref().expect("cache just built");
         self.scratch.prepare(mesh.n_cells());
@@ -200,7 +245,16 @@ impl Process for TectonicsProcess {
 
         match planet.phase {
             Phase::CrustalFormation => {
-                phase1::step(planet, mesh, dt_myr, ctx, cache, &mut self.scratch)
+                let count = planet.config.craton_count as usize;
+                if self
+                    .cratons
+                    .as_ref()
+                    .is_none_or(|s| !s.matches(seed, count, cache.pitch_m))
+                {
+                    self.cratons = Some(craton::CratonSet::new(seed, count, cache.pitch_m));
+                }
+                let cratons = self.cratons.as_ref().expect("craton set just built");
+                phase1::step(planet, mesh, dt_myr, ctx, cache, cratons, &mut self.scratch)
             }
             Phase::Drift | Phase::Refinement | Phase::RecentPast => {
                 drift::step(planet, mesh, dt_myr, ctx, cache, &mut self.scratch)
