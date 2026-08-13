@@ -9,7 +9,7 @@ use common::*;
 use glam::DVec3;
 use iw_core::planet::cell_flags;
 use iw_core::{CrustType, Phase, Planet, Plate, RockType};
-use iw_mesh::{great_circle_km, Mesh};
+use iw_mesh::Mesh;
 use iw_tectonics::{craton_min_separation_m, TectonicsProcess};
 
 // --- Phase 1: craton seeding ---

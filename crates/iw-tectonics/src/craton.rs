@@ -118,17 +118,6 @@ pub(crate) struct CratonShape {
 }
 
 impl CratonShape {
-    /// Rotation carrying world directions into this craton's local frame, given
-    /// the craton's current world centroid (unit).
-    pub(crate) fn frame(&self, centroid: Vec3) -> Quat {
-        Quat::from_rotation_arc(centroid, self.centroid_local)
-    }
-
-    /// World direction of the cap's pole under `frame`.
-    pub(crate) fn pole_world(&self, frame: Quat) -> Vec3 {
-        frame.inverse() * Vec3::Z
-    }
-
     /// Angular radius the shape is truncated at. The absolute worst case
     /// (`OUTLINE_AMP` and `WARP_AMP` both at their peak fBm value, in the same
     /// place) is 2.8 radii plus 1.2 rad, which is most of the sphere and makes

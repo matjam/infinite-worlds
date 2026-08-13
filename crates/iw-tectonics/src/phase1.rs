@@ -122,11 +122,11 @@ fn seed_supercontinent(
             ctx.ledger,
         );
     }
-    for c in 0..n {
-        if let Some((mass, f)) = members[c] {
-            let thickness = genesis.target_thickness_m(mass, mesh.centers[c], f);
+    for (c, member) in members.iter().enumerate() {
+        if let Some((mass, f)) = member {
+            let thickness = genesis.target_thickness_m(*mass, mesh.centers[c], *f);
             make_continental(planet, c as u32, thickness, cache.area_m2[c], ctx.ledger);
-            planet.plate_id[c] = mass;
+            planet.plate_id[c] = *mass;
             continental_cells += 1;
         }
     }

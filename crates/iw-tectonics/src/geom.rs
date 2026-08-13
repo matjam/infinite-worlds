@@ -8,12 +8,6 @@ use iw_mesh::{Mesh, EARTH_RADIUS_M};
 use rand::Rng;
 use rand_pcg::Pcg64Mcg;
 
-/// Rodrigues rotation of `v` about the unit axis `axis` by `angle` radians.
-pub(crate) fn rotate_about(v: DVec3, axis: DVec3, angle: f64) -> DVec3 {
-    let (s, c) = angle.sin_cos();
-    v * c + axis.cross(v) * s + axis * (axis.dot(v) * (1.0 - c))
-}
-
 /// Uniformly distributed unit vector (area-preserving z/phi sampling).
 pub(crate) fn random_unit(rng: &mut Pcg64Mcg) -> Vec3 {
     let z: f32 = rng.random_range(-1.0f32..1.0);
@@ -66,11 +60,6 @@ pub(crate) fn cell_pitch_m(mesh: &Mesh) -> f64 {
     (2.0 * mean_m2 / 3.0f64.sqrt()).sqrt()
 }
 
-/// Great-circle distance between unit vectors, in metres.
-pub(crate) fn arc_m(a: Vec3, b: Vec3) -> f64 {
-    (a.dot(b).clamp(-1.0, 1.0) as f64).acos() * EARTH_RADIUS_M
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -89,13 +78,5 @@ mod tests {
         };
         let back = plate.velocity_m_yr(r);
         assert!((back - v).length() < 1e-6, "{back:?} vs {v:?}");
-    }
-
-    #[test]
-    fn rotation_preserves_length() {
-        let v = DVec3::new(1.0, 2.0, 3.0).normalize();
-        let axis = DVec3::new(-1.0, 0.4, 0.2).normalize();
-        let out = rotate_about(v, axis, 0.7);
-        assert!((out.length() - 1.0).abs() < 1e-12);
     }
 }
