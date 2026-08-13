@@ -6,8 +6,9 @@
 //! `planet.temperature_c` already carries the ~100 kyr glacial oscillation that
 //! iw-climate bakes in, so this pass only has to respond to it: snow
 //! accumulates below [`SNOW_TEMP_C`] at the local precipitation rate, and melts
-//! above 0 °C at a degree-day rate. Meltwater is handed to the drainage solve
-//! as extra runoff.
+//! at a degree-day rate driven by the annual mean plus [`MELT_SEASON_C`] (the
+//! melt season is summer, not the annual mean). Meltwater is handed to the
+//! drainage solve as extra runoff.
 //!
 //! # Flow
 //!
@@ -42,6 +43,30 @@ pub const SNOW_RAMP_C: f32 = 2.0;
 pub const ACCUMULATION_EFFICIENCY: f32 = 0.5;
 /// Degree-day melt factor, m of ice per °C above freezing per year.
 pub const MELT_M_PER_C_YR: f32 = 0.5;
+/// Warmth of the melt season above the annual mean, °C.
+///
+/// `planet.temperature_c` is an annual mean, but ablation is a *summer*
+/// process: a degree-day sum is positive wherever the warmest weeks clear 0 °C,
+/// which on Earth happens well below a 0 °C annual mean. Driving ablation
+/// straight off the annual mean instead gave every cell below -2 °C an
+/// unopposed accumulation term, so ice grew to its cap anywhere it could form
+/// and nothing ever melted it back. Adding the melt-season offset before the
+/// max puts the permanent-ice line near a -8 °C annual mean, which is about
+/// where Earth's is; `iw-climate`'s per-cell seasonal amplitude is not visible
+/// from this crate, so it is a constant.
+pub const MELT_SEASON_C: f32 = 9.0;
+/// Melt-season offset used instead of [`MELT_SEASON_C`] for ice standing over
+/// water, °C.
+///
+/// Ice that has flowed off the coast is floating, and the sea beneath it is a
+/// heat source that never drops below its freezing point — shelves melt from
+/// below and calve regardless of the air above them. This model has no calving
+/// and no basal term, so without something here a single polar ice cap flows
+/// out across every high-latitude ocean cell and stops only when it meets air
+/// warm enough to melt it: the observed failure mode was a Southern-Ocean ice
+/// belt reaching 50 deg. Doubling the effective melt season over water pins the
+/// shelf edge near 74 deg, which is about where Earth's perennial sea ice sits.
+pub const OCEAN_MELT_SEASON_C: f32 = 16.0;
 /// Ice thickness cap, metres (Antarctic interior scale).
 pub const MAX_ICE_M: f32 = 3000.0;
 
@@ -107,13 +132,19 @@ pub fn run(
         let t = planet.temperature_c[i];
         let precip_m = (planet.precip_mm_yr[i] as f64 / 1000.0).max(0.0) as f32;
         let snow_fraction = ((SNOW_TEMP_C - t) / SNOW_RAMP_C).clamp(0.0, 1.0);
+        let grounded = planet.elevation_m[i] >= sea;
         // Snow only settles on ground; open ocean is left to iw-climate.
-        let accum = if planet.elevation_m[i] >= sea {
+        let accum = if grounded {
             precip_m * ACCUMULATION_EFFICIENCY * snow_fraction
         } else {
             0.0
         };
-        let ablation = MELT_M_PER_C_YR * (t - 0.0).max(0.0);
+        let season = if grounded {
+            MELT_SEASON_C
+        } else {
+            OCEAN_MELT_SEASON_C
+        };
+        let ablation = MELT_M_PER_C_YR * (t + season).max(0.0);
         let ice = planet.ice_thickness_m[i];
         let net = (accum - ablation) as f64 * dt_yr;
         let new_ice = ((ice as f64 + net).clamp(0.0, MAX_ICE_M as f64)) as f32;

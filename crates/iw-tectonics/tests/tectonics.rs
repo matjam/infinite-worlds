@@ -64,7 +64,12 @@ fn cratons_are_seeded_spaced_and_thick() {
         }
         land += 1;
         let t = h.planet.crust_thickness_m[c as usize];
-        assert!((35_000.0..=45_000.0).contains(&t), "craton thickness {t}");
+        // Calibration: the band tracks `CRATON_EDGE_THICKNESS_M` ..
+        // `CRATON_CORE_THICKNESS_M`, which moved from 35-45 km to 31-40 km.
+        // 45 km floats at +2.6 km (a plateau, not a shield) and 35 km is
+        // exactly the +800 m anchor, so the old edge value left every craton
+        // dry to its outermost cell and the planet had no continental shelf.
+        assert!((31_000.0..=40_000.0).contains(&t), "craton thickness {t}");
         assert_eq!(h.planet.crust_density_kg_m3[c as usize], 2_700.0);
         assert!(
             !h.planet.columns.col(c).is_empty(),

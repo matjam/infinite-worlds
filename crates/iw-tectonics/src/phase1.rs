@@ -26,10 +26,16 @@ use crate::{
 };
 
 /// Fraction of the planet the craton nuclei are sized to cover in total.
-/// Earth's continental crust (shelves included) is a little under 40%; starting
-/// nearer 26% leaves room for arc growth and matches the land fractions the
-/// golden planets expect once sea level is solved.
-const CONTINENTAL_TARGET_FRACTION: f64 = 0.26;
+///
+/// Earth's continental crust, shelves included, is a little under 40%, of which
+/// ~29% of the globe stands above water. Calibration: 0.26 was too little. It
+/// gave a 26% continental planet whose *entire* continental area was dry land
+/// (nothing to flood into shelves) and, worse, left 74% of the planet as deep
+/// basin, so the fixed water budget had to pool 3.5 km deep and dragged sea
+/// level a kilometre below the geoid. 0.37 leaves room for arc growth to reach
+/// Earth's ~40% and produces ~30% land with a real drowned margin around it —
+/// at 0.34 the drowned margin ate the gain and land came out under 25%.
+const CONTINENTAL_TARGET_FRACTION: f64 = 0.37;
 /// Per-craton area spread about the mean, as a multiplier.
 const CRATON_AREA_SPREAD: (f64, f64) = (0.65, 1.35);
 /// Poisson-disc rejection distance as a multiple of the two radii summed.
@@ -56,15 +62,24 @@ const TARGET_PLATES_MAX: usize = 8;
 /// Speed given to the ocean plates invented at the hand-off, m/yr.
 const SEED_PLATE_SPEED_M_YR: f32 = 0.04;
 
-/// Deterministic per-craton shape, derived from `(seed, index)` alone.
+/// Deterministic per-craton shape, derived from `(seed, index)` alone: a mean
+/// radius modulated by three odd
+/// harmonics of azimuth. Calibration: with the original 3/5 harmonics at
+/// 0.06-0.18 / 0.03-0.10 the outline stayed visibly circular at level 6 — a
+/// craton is only ~15 cells across, so a 12% wobble is under two cells of
+/// deviation and the coastlines read as discs. The amplitudes are roughly
+/// doubled and a 7th harmonic added, which puts the peak deviation at 4-6 cells
+/// and gives promontories and embayments at continent scale.
 struct CratonShape {
     radius_m: f64,
     /// Reference direction fixing the azimuth zero of the lobe pattern.
     ref_axis: Vec3,
     lobe3: f32,
     lobe5: f32,
+    lobe7: f32,
     phase3: f32,
     phase5: f32,
+    phase7: f32,
 }
 
 impl CratonShape {
@@ -72,8 +87,9 @@ impl CratonShape {
     fn radius_at(&self, phi: f32) -> f64 {
         let w = 1.0
             + self.lobe3 * (3.0 * phi + self.phase3).sin()
-            + self.lobe5 * (5.0 * phi + self.phase5).sin();
-        self.radius_m * w.clamp(0.6, 1.4) as f64
+            + self.lobe5 * (5.0 * phi + self.phase5).sin()
+            + self.lobe7 * (7.0 * phi + self.phase7).sin();
+        self.radius_m * w.clamp(0.55, 1.45) as f64
     }
 }
 
@@ -88,10 +104,12 @@ fn craton_shapes(seed: u64, count: usize) -> Vec<CratonShape> {
                     * rng.random_range(CRATON_AREA_SPREAD.0..CRATON_AREA_SPREAD.1),
             ),
             ref_axis: random_unit(&mut rng),
-            lobe3: rng.random_range(0.06f32..0.18),
-            lobe5: rng.random_range(0.03f32..0.10),
+            lobe3: rng.random_range(0.10f32..0.26),
+            lobe5: rng.random_range(0.06f32..0.16),
+            lobe7: rng.random_range(0.04f32..0.10),
             phase3: rng.random_range(0.0f32..std::f32::consts::TAU),
             phase5: rng.random_range(0.0f32..std::f32::consts::TAU),
+            phase7: rng.random_range(0.0f32..std::f32::consts::TAU),
         })
         .collect()
 }

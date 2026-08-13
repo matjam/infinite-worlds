@@ -14,18 +14,33 @@ const LAKE_EVAPORATION_FACTOR: f32 = 0.8;
 /// Ice thickness at which a water surface stops evaporating, metres.
 const ICE_SEAL_M: f32 = 10.0;
 /// Rainout fraction per reference cell traversed, before modifiers.
-const BASE_RAINOUT: f32 = 0.10;
+///
+/// Calibration: at 0.10 an air parcel shed most of its load inside ~1000 km of
+/// where it evaporated. Ocean basins here are several times that wide, so the
+/// overwhelming majority of ocean evaporation rained straight back into the
+/// ocean and land ran arid — deserts took 40%+ of the land surface against
+/// Earth's ~19%. 0.07 stretches the rainout length to ~1600 km, which both
+/// lands more of the ocean's moisture on the coast and carries it further
+/// inland once it is there.
+const BASE_RAINOUT: f32 = 0.07;
 /// ITCZ convergence bonus at the equator.
 const ITCZ_GAIN: f32 = 0.30;
 /// Gaussian width of the ITCZ, degrees.
 const ITCZ_WIDTH_DEG: f32 = 9.0;
 /// Polar-front convergence bonus, centred on [`POLAR_FRONT_DEG`].
+/// Calibration: moved equatorward from 55 deg and widened. The storm-track
+/// rainfall maximum sits nearer 50 deg, and at 55/12 the wet belt cleared the
+/// 34-50 deg temperate band almost entirely — that band was left between the
+/// subtropical dry belt and the polar front with no convergence term at all, so
+/// temperate forest never got the 800 mm/yr it needs.
 const POLAR_FRONT_GAIN: f32 = 0.15;
-const POLAR_FRONT_DEG: f32 = 55.0;
-const POLAR_FRONT_WIDTH_DEG: f32 = 12.0;
+const POLAR_FRONT_DEG: f32 = 50.0;
+const POLAR_FRONT_WIDTH_DEG: f32 = 14.0;
 /// Subtropical subsidence penalty, centred on [`SUBTROPICAL_DEG`]: descending
 /// air in the horse latitudes converts almost nothing to rain.
-const SUBTROPICAL_PENALTY: f32 = 0.08;
+/// Scaled down with [`BASE_RAINOUT`]: the penalty is meant to leave the horse
+/// latitudes at the [`RAINOUT_MIN`] floor, not to hold a much wider band there.
+const SUBTROPICAL_PENALTY: f32 = 0.055;
 const SUBTROPICAL_DEG: f32 = 30.0;
 const SUBTROPICAL_WIDTH_DEG: f32 = 11.0;
 /// Uphill rise, in metres, that adds a full [`ORO_MAX`] of rainout.
@@ -37,12 +52,34 @@ const ORO_MAX: f32 = 0.40;
 const RAINOUT_MIN: f32 = 0.02;
 const RAINOUT_MAX: f32 = 0.90;
 /// Advection sweeps at the reference subdivision level (6).
-const SWEEPS_REF: f32 = 14.0;
+///
+/// Calibration: 14 sweeps of a ~110 km cell is a 1550 km fetch, which is short
+/// even against a single step's worth of atmosphere — water vapour's residence
+/// time is about nine days and mid-latitude winds run 10 m/s, so a parcel
+/// really does travel several thousand kilometres between evaporating and
+/// raining. 24 sweeps (~2650 km) is still conservative and is what stops
+/// continental interiors starving: they were coming out below the 250 mm/yr
+/// desert threshold almost everywhere.
+const SWEEPS_REF: f32 = 24.0;
 /// Fraction of the previous step's rainfall a land cell returns to the air.
 /// Continental interiors are fed by this recycling, not by ocean fetch: one
 /// step's advection only reaches `sweeps` cells inland, and real interiors sit
 /// much further from the sea than that.
-const ET_FRACTION: f32 = 0.40;
+///
+/// Calibration: this is evapotranspiration as a fraction of what fell, and
+/// Earth's land-wide ET/P is ~0.6, not 0.4. At 0.4 the recycling chain lost
+/// 60% per advection length and continental interiors an advection length or
+/// two from the coast fell below the 250 mm/yr desert threshold almost
+/// everywhere.
+///
+/// **0.50 is a stability ceiling, not a free choice.** Land recycling is a
+/// closed loop — precipitation feeds evapotranspiration feeds precipitation —
+/// and the global water-balance rescale below adds gain wherever rainout is
+/// efficient. Above ~0.5 the loop gain in the ITCZ band exceeds one and a
+/// planet with no ocean at all grows rain out of nothing instead of drying
+/// out (`tolerates_a_planet_with_no_ocean` catches exactly this). Anything
+/// wetter has to come from a real reservoir, not from raising this.
+const ET_FRACTION: f32 = 0.50;
 /// Fraction of the previous precipitation field retained each step.
 const PRECIP_INERTIA: f32 = 0.2;
 

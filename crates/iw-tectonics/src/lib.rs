@@ -68,9 +68,20 @@ pub const AGE_DENSITY_COEFF: f32 = 30.0;
 /// Continental crust density, kg/m^3.
 pub const CONTINENTAL_DENSITY_KG_M3: f32 = 2_700.0;
 /// Continental crust thickness at a craton's edge, metres.
-pub const CRATON_EDGE_THICKNESS_M: f32 = 35_000.0;
+///
+/// Calibration: 35 km is the isostatic anchor for +800 m, so the old value put
+/// the *outermost* ring of every craton a full 800 m above the geoid and the
+/// planet had no drowned margin anywhere. 31 km floats at ~-260 m, so the outer
+/// couple of cells of a craton start life as shelf.
+pub const CRATON_EDGE_THICKNESS_M: f32 = 31_000.0;
 /// Continental crust thickness at a craton's centre, metres.
-pub const CRATON_CORE_THICKNESS_M: f32 = 45_000.0;
+///
+/// Calibration: 45 km floats at +2.6 km, which is a plateau, not a shield. Real
+/// cratons are thick *and* low because their depleted lithospheric roots are
+/// cold and dense; this model has no root term, so the crust has to be thinner
+/// to stand at a shield-like height. 40 km gives +1.7 km at the core, tapering
+/// quadratically to the drowned edge.
+pub const CRATON_CORE_THICKNESS_M: f32 = 40_000.0;
 /// Tibet-scale ceiling on crustal thickening, metres.
 pub const MAX_CRUST_THICKNESS_M: f32 = 70_000.0;
 /// Crustal thickness at which a stretched continental cell breaks and becomes

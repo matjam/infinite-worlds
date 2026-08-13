@@ -62,7 +62,13 @@ const ARC_MAX_OCEANIC_M: f32 = 26_000.0;
 /// (closure * dt / pitch).
 const TRENCH_FLEX_RATE: f32 = 1.5;
 /// Fraction of shortening strain converted into crustal thickening.
-const COLLIDE_SHORTENING: f32 = 0.20;
+///
+/// Calibration: thickening is proportional to the crust already there, so
+/// thinning the craton seeds (45 -> 40 km) compounded through every collision
+/// and cost the tallest orogens ~2 km. 0.32 puts collisional belts back at
+/// 60-70 km of root, i.e. 4-6 km of relief, without letting them pin at the
+/// 70 km ceiling everywhere.
+const COLLIDE_SHORTENING: f32 = 0.32;
 /// Fraction of extensional strain converted into crustal thinning.
 const RIFT_STRETCH: f32 = 0.07;
 /// Basalt veneer left on a freshly consumed trench cell, m.
@@ -72,7 +78,12 @@ const TRENCH_VENEER_M: f32 = 300.0;
 const OCEAN_RELAX_TAU_MYR: f32 = 25.0;
 /// Orogenic collapse: thickened continental crust creeps back toward this
 /// thickness with the time constant below.
-const CONTINENTAL_REST_M: f32 = 38_000.0;
+///
+/// Calibration: 38 km floats at +1.35 km, so every continent that had time to
+/// relax ended up a kilometre-and-a-half plateau and nothing was lowland. 34 km
+/// floats at +545 m and 36 km at +982 m — a mature continental platform, near
+/// Earth's 840 m mean land elevation once orogens and shields are averaged in.
+const CONTINENTAL_REST_M: f32 = 36_000.0;
 const CONTINENTAL_RELAX_TAU_MYR: f32 = 400.0;
 
 // --- rifting / welding ---

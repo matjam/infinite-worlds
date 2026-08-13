@@ -70,10 +70,15 @@ fn isostasy_anchors() {
     assert_band("35 km / 2700 continental", cont, 800.0, 800.0);
 
     let fresh = uniform_elevation(&mesh, 7_000.0, 3000.0, CrustType::Oceanic);
-    assert_band("7 km / 3000 fresh ocean", fresh, -3500.0, -2500.0);
+    assert_band("7 km / 3000 fresh ocean", fresh, -3000.0, -2400.0);
 
+    // Calibration: the abyssal anchor was moved from -5564 m to -4200 m. This
+    // model's ocean floor has no age spread (rigid plates, no advection), so it
+    // all sits at this one depth; anchoring it at Earth's *mean* ocean depth
+    // rather than Earth's abyssal-plain depth is what puts the solved sea level
+    // near the geoid. See `isostasy::ANCHOR_OCEAN_OLD_ELEV_M`.
     let old = uniform_elevation(&mesh, 7_000.0, 3300.0, CrustType::Oceanic);
-    assert_band("7 km / 3300 old ocean", old, -6500.0, -5500.0);
+    assert_band("7 km / 3300 old ocean", old, -4500.0, -3900.0);
 
     let orogen = uniform_elevation(&mesh, 70_000.0, 2750.0, CrustType::Continental);
     assert_band("70 km / 2750 orogen", orogen, 5000.0, 8000.0);
@@ -86,8 +91,13 @@ fn old_ocean_is_deeper_than_young_ocean() {
     let mid = uniform_elevation(&mesh, 7_000.0, 3150.0, CrustType::Oceanic);
     let old = uniform_elevation(&mesh, 7_000.0, 3300.0, CrustType::Oceanic);
     assert!(old < mid && mid < young, "{old} < {mid} < {young}");
+    // Calibration: ridge-to-abyss relief is now 1500 m (ridge -2700, abyss
+    // -4200), not the >2000 m the pre-calibration anchors gave. The lost relief
+    // went into `OCEAN_LID_RESIDUAL_M`, the age-independent part of the lid,
+    // because the ocean floor here never gets young again and the whole basin
+    // would otherwise sit at the deep end of the ramp.
     assert!(
-        young - old > 2000.0,
+        young - old > 1200.0,
         "thermal subsidence only {} m",
         young - old
     );

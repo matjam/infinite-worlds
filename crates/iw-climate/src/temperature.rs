@@ -10,6 +10,19 @@ pub const T_EQUATOR_C: f32 = 28.0;
 pub const T_POLE_C: f32 = -25.0;
 /// Environmental lapse rate applied above sea level, degrees C per metre.
 pub const LAPSE_RATE_C_PER_M: f32 = 0.0065;
+/// Largest ice thickness, in metres, that counts toward the lapse-rate height
+/// of a cell. **Stability measure, not physics.**
+///
+/// The radiating surface of an ice sheet really is its top, and a 3 km dome
+/// really is ~20 C colder at the top than at its bed. But feeding that back
+/// into the temperature that drives the *mass balance* closes a positive loop
+/// with no negative branch anywhere in this model: ice raises the surface,
+/// which lowers the temperature, which grows more ice, and ablation never gets
+/// a chance to win — the observed failure mode was 20% of the planet under ice
+/// at an interglacial, spreading to mid-latitude lowlands. Capping the ice
+/// contribution at 800 m (~5 C) keeps the high-ice-plateau signal without the
+/// runaway. Bed elevation is never capped.
+pub const ICE_LAPSE_CAP_M: f32 = 800.0;
 /// Distance-to-ocean saturation, in cells: beyond this a cell is fully
 /// continental and the maritime terms stop changing.
 pub const MAX_OCEAN_DISTANCE_CELLS: u8 = 8;
@@ -33,11 +46,32 @@ pub fn continentality(dist_cells: u8) -> f32 {
     dist_cells.min(MAX_OCEAN_DISTANCE_CELLS) as f32 / MAX_OCEAN_DISTANCE_CELLS as f32
 }
 
-/// Latitudinal insolation curve: `T_eq - (T_eq - T_pole) * sin^2(lat)`.
+/// Share of the equator-to-pole falloff carried by the `sin^4` term rather than
+/// `sin^2`; see [`zonal_mean_c`].
+pub const ZONAL_QUARTIC_WEIGHT: f32 = 0.6;
+
+/// Latitudinal insolation curve:
+/// `T_eq - (T_eq - T_pole) * ((1-w)*sin^2(lat) + w*sin^4(lat))`.
+///
+/// Calibration: plain `sin^2` is the textbook first-order fit and it is badly
+/// wrong in the middle. It puts 45 deg at the arithmetic midpoint of equator and
+/// pole — +1.5 C here, against Earth's observed ~+12 C — because Earth's zonal
+/// mean is flat across the tropics and then falls off steeply, not sinusoidally.
+/// The consequences ran through everything downstream: mid-latitude ocean too
+/// cold to evaporate (evaporation halves per 10 C), so continents were arid;
+/// the -5..+5 C taiga band squeezed into a couple of degrees of latitude; ice
+/// forming from 50 deg poleward. Mixing in `sin^4` at
+/// [`ZONAL_QUARTIC_WEIGHT`] tracks the observed profile to a couple of degrees
+/// from the equator to the pole (45 deg -> +9.5 C, 60 deg -> -6 C,
+/// 30 deg -> +21 C) while keeping both anchors exact.
 #[inline]
 pub fn zonal_mean_c(lat_rad: f32) -> f32 {
-    let s = lat_rad.sin();
-    T_EQUATOR_C - (T_EQUATOR_C - T_POLE_C) * s * s
+    let s2 = {
+        let s = lat_rad.sin();
+        s * s
+    };
+    let falloff = (1.0 - ZONAL_QUARTIC_WEIGHT) * s2 + ZONAL_QUARTIC_WEIGHT * s2 * s2;
+    T_EQUATOR_C - (T_EQUATOR_C - T_POLE_C) * falloff
 }
 
 /// Global temperature anomaly from Milankovitch-style glacial cycles.
@@ -91,6 +125,13 @@ pub fn seasonal_amplitude_at(lat_rad: f32, axial_tilt_deg: f32, dist_cells: u8) 
     let s = lat_rad.sin();
     let cont = 1.0 + dist_cells.min(MAX_OCEAN_DISTANCE_CELLS) as f32 / 4.0;
     SEASONAL_BASE_C * s * s * (axial_tilt_deg / REFERENCE_TILT_DEG).max(0.0) * cont
+}
+
+/// Height above sea level the lapse rate is applied to: bed elevation plus the
+/// ice column, with the ice part limited to [`ICE_LAPSE_CAP_M`].
+#[inline]
+pub fn lapse_surface_m(elevation_m: f32, ice_thickness_m: f32, sea_level_m: f32) -> f32 {
+    elevation_m + ice_thickness_m.clamp(0.0, ICE_LAPSE_CAP_M) - sea_level_m
 }
 
 /// Cells of graph distance from each cell to the nearest open-ocean cell,
@@ -173,7 +214,7 @@ pub(crate) fn update(planet: &mut Planet, mesh: &Mesh, dist: &[u8]) {
         .par_iter_mut()
         .enumerate()
         .for_each(|(i, t)| {
-            let surface = elev[i] + ice[i] - sea;
+            let surface = lapse_surface_m(elev[i], ice[i], sea);
             *t = annual_mean_temperature_c(latlon[i][0], surface, dist[i], &config, time_myr);
         });
 }
