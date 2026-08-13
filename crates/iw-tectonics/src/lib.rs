@@ -116,7 +116,10 @@ pub const TRENCH_THICKNESS_M: f32 = 4_200.0;
 /// Number of cells a plate must have before it may be rifted apart.
 pub const MIN_RIFTABLE_CELLS: usize = 24;
 /// Hard ceiling on the number of live plates.
-pub const MAX_PLATES: usize = 16;
+/// Safety valve only — never the thing that decides how many plates exist.
+/// The steady-state count emerges from the rift/weld/absorb dynamics; this
+/// bound exists so a pathological run cannot allocate unbounded plate state.
+pub const MAX_PLATES: usize = 64;
 
 /// Tectonics as a [`Process`]. Stateless with respect to the simulation: the
 /// struct holds only mesh-derived caches and scratch buffers.

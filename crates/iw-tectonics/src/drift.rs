@@ -30,18 +30,24 @@ const COLLISION_VISC: f64 = 100.0;
 /// Converts driving torque density into angular velocity, rad*m/Myr.
 /// Calibrated so a plate with a normal share of subducting boundary settles
 /// around 4-6 cm/yr at `tectonic_vigor == 1`.
-const TORQUE_GAIN: f64 = 1.3e5;
+const TORQUE_GAIN: f64 = 2.0e5;
 /// Smallest plate area, as a fraction of the planet, that the drag term will
 /// use. Without it a microplate's perimeter-to-area ratio drives it straight
 /// into the speed cap; real microplates are dragged along by their neighbours.
 const MIN_DRAG_AREA_FRAC: f64 = 0.10;
-/// Extra basal drag from thick continental keels, as a fraction.
-const CONTINENTAL_DRAG: f64 = 1.4;
-/// Relaxation time of a plate's angular velocity toward the force balance, Myr.
-const MOTION_TAU_MYR: f64 = 12.0;
+/// Extra basal drag from thick continental keels, as a fraction. Kept mild:
+/// heavy keel drag is one of the three things that parked continents entirely
+/// (with eager welding and collisional braking).
+const CONTINENTAL_DRAG: f64 = 0.6;
+/// Relaxation time of a plate's angular velocity toward the force balance,
+/// Myr. Long on purpose: real plates hold a heading for 100+ Myr (the Atlantic
+/// has opened monotonically since Pangaea), and short relaxation turns drift
+/// into a random walk that nets almost no displacement over an era. 25 Myr
+/// balances heading persistence against a tolerable spin-up time from rest.
+const MOTION_TAU_MYR: f64 = 25.0;
 /// Random mantle-torque walk, rad/Myr per Myr. Keeps plates whose boundaries
 /// are all transform from stalling completely.
-const MANTLE_JITTER_RAD_MYR: f64 = 0.0016;
+const MANTLE_JITTER_RAD_MYR: f64 = 0.0008;
 /// Absolute plate speed ceiling, m/yr.
 const MAX_PLATE_SPEED_M_YR: f64 = 0.15;
 
@@ -97,17 +103,23 @@ const RIFT_PROB_SUPER_PER_MYR: f64 = 0.025;
 /// Background rift nucleation probability per Myr for any other plate.
 const RIFT_PROB_BASE_PER_MYR: f64 = 0.0002;
 /// Opening speed handed to the two halves of a fresh rift, m/yr.
-const RIFT_SEPARATION_M_YR: f32 = 0.03;
+const RIFT_SEPARATION_M_YR: f32 = 0.05;
 /// Smallest fragment a rift may produce, in cells.
 const MIN_RIFT_FRAGMENT: usize = 6;
 /// Collisional boundary length, in cell pitches, needed before plates may weld.
 const WELD_MIN_PITCHES: f64 = 2.0;
-/// Closure rate below which a collision is considered locked, m/yr.
-const WELD_SPEED_M_YR: f64 = 0.020;
+/// Closure rate below which a collision is considered locked, m/yr. Welding
+/// waits for a truly stalled collision — eager welding freezes continents in
+/// place and kills visible drift; the braking term does the slowing first.
+const WELD_SPEED_M_YR: f64 = 0.008;
 /// A long boundary with almost no relative motion is not a boundary: the two
 /// plates are merged. This is what keeps the mosaic from fragmenting forever.
-const QUIET_MERGE_PITCHES: f64 = 8.0;
-const QUIET_MERGE_SPEED_M_YR: f64 = 0.004;
+/// Kept strict (long + truly dead) so merging can't collapse the mosaic into
+/// a single superplate.
+const QUIET_MERGE_PITCHES: f64 = 12.0;
+const QUIET_MERGE_SPEED_M_YR: f64 = 0.002;
+/// Area fraction beyond which any plate rifts on size alone.
+const GIANT_PLATE_AREA_FRAC: f64 = 0.40;
 
 /// Basalt erupted over a plume, m/Myr at strength 1.
 const HOTSPOT_DEPOSIT_M_MYR: f32 = 40.0;
@@ -614,8 +626,15 @@ fn rift_step(
         } else {
             0.0
         };
+        // A mostly-continental superplate rifts along its sutures; but ANY
+        // plate past the giant threshold rifts on sheer size — slab pull tears
+        // huge oceanic plates apart regardless of composition. Without the
+        // size-only branch the mosaic collapses into one immortal superplate
+        // once aggressive welding has merged everything.
         let per_myr = if frac > SUPERPLATE_AREA_FRAC && cfrac > SUPERPLATE_CONT_FRAC {
             RIFT_PROB_SUPER_PER_MYR
+        } else if frac > GIANT_PLATE_AREA_FRAC {
+            RIFT_PROB_SUPER_PER_MYR * ((frac - GIANT_PLATE_AREA_FRAC) / 0.2).min(2.0)
         } else {
             RIFT_PROB_BASE_PER_MYR
         } * vigor;

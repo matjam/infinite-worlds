@@ -201,6 +201,59 @@ fn divergence_leaves_an_age_gradient() {
     );
 }
 
+/// The whole point of drift v2, measured: over a default 200 Myr drift era the
+/// continental map must genuinely rearrange under the emergent force balance —
+/// not just wobble in place. Jaccard overlap between the start-of-drift and
+/// end-of-drift continental masks is the metric ("1.0" would mean nothing
+/// moved at all).
+#[test]
+fn continents_rearrange_over_a_drift_era() {
+    let level = 5;
+    let mesh = Arc::new(Mesh::build(level));
+    let mut planet = Planet::new(config(level), mesh.n_cells());
+    let mut p = TectonicsProcess::default();
+    let mut total = MassLedger::default();
+    // Full crustal-formation era builds cratons and hands off plates.
+    planet.phase = Phase::CrustalFormation;
+    for _ in 0..200 {
+        step(&mut p, &mut planet, &mesh, 1.0, &mut total);
+    }
+    planet.phase = Phase::Drift;
+    // A couple of steps so the hand-off partition exists before sampling.
+    for _ in 0..4 {
+        step(&mut p, &mut planet, &mesh, 0.5, &mut total);
+    }
+    let start: Vec<bool> = planet
+        .crust_type
+        .iter()
+        .map(|t| *t == CrustType::Continental)
+        .collect();
+    for _ in 0..396 {
+        step(&mut p, &mut planet, &mesh, 0.5, &mut total);
+    }
+    let mut inter = 0usize;
+    let mut union = 0usize;
+    for (t, was) in planet.crust_type.iter().zip(&start) {
+        let now = *t == CrustType::Continental;
+        if now && *was {
+            inter += 1;
+        }
+        if now || *was {
+            union += 1;
+        }
+    }
+    let jaccard = inter as f64 / union.max(1) as f64;
+    println!("continental mask Jaccard over 198 Myr of drift: {jaccard:.3}");
+    assert!(
+        jaccard < 0.65,
+        "continents barely moved: Jaccard {jaccard:.3} (want < 0.65 turnover)"
+    );
+    assert!(
+        jaccard > 0.05,
+        "continental map unrecognizable: Jaccard {jaccard:.3} — mass not conserved?"
+    );
+}
+
 /// Fixed hotspot under a moving oceanic plate deposits a spatially extended
 /// basalt trail, not a single immortal cone.
 #[test]
