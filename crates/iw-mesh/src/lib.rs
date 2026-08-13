@@ -243,6 +243,34 @@ impl Mesh {
         self.centers.len()
     }
 
+    /// Cheap identity fingerprint for cache invalidation.
+    ///
+    /// Era re-tessellation rebuilds the mesh at the SAME cell budget, so any
+    /// cache keyed on `n_cells` alone survives the swap and silently indexes
+    /// a foreign adjacency (climate advection died exactly this way: >90% of
+    /// land got precip 0.0 after the first retess). Samples a handful of
+    /// center coordinates plus the CSR shape — two distinct tessellations
+    /// cannot collide on all of those.
+    pub fn fingerprint(&self) -> u64 {
+        let mut h = 0xcbf29ce484222325u64;
+        let mut mix = |v: u64| {
+            h ^= v;
+            h = h.wrapping_mul(0x100000001b3);
+        };
+        mix(self.centers.len() as u64);
+        mix(self.neighbors.len() as u64);
+        mix(self.vertices.len() as u64);
+        let n = self.centers.len();
+        for idx in [0, n / 3, n / 2, 2 * n / 3, n.saturating_sub(1)] {
+            let c = self.centers[idx];
+            mix(c.x.to_bits() as u64);
+            mix(c.y.to_bits() as u64);
+            mix(c.z.to_bits() as u64);
+            mix(self.neighbor_offsets[idx] as u64);
+        }
+        h
+    }
+
     /// Neighbor cell ids of `cell`, in the same rotational order as its corners.
     #[inline]
     pub fn neighbors_of(&self, cell: u32) -> &[u32] {

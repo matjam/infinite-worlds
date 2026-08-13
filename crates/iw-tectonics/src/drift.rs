@@ -977,9 +977,17 @@ fn split_plate(
     let push_old = omega_for_velocity(r_old, reproject(-sep, r_old) * RIFT_SEPARATION_M_YR);
     let base = planet.plates[p as usize].clone();
     set_omega(&mut planet.plates[p as usize], w_old + push_old);
+    // Both halves remember the pair: weld immunity must hold from either
+    // side, and a purely continental rift has no oceanic seam for the
+    // age-based immunity to see.
+    let now = planet.time_myr;
+    planet.plates[p as usize].rift_partner = Some(new_id);
+    planet.plates[p as usize].rift_born_myr = now;
     let mut fresh = Plate {
         welded_to: None,
         accum: glam::DQuat::IDENTITY,
+        rift_partner: Some(p),
+        rift_born_myr: now,
         ..base
     };
     set_omega(&mut fresh, w_old + push_new);
@@ -1040,7 +1048,17 @@ fn weld_step(
         // or active divergence (a rift still cutting through continent).
         let young_ocean = acc.age_len / acc.len_m.max(1.0) < RIFT_WELD_IMMUNITY_MYR;
         let opening = acc.open_len / acc.len_m.max(1.0) > RIFT_OPEN_IMMUNITY_M_YR;
-        if young_ocean || opening {
+        // Explicit rift-pair immunity: a fresh CONTINENTAL rift has no
+        // oceanic seam for the age test to see, and its divergence takes a
+        // while to spin up — without this the weld pass recaptured every
+        // continental breakup within ~20 Myr.
+        let (x, y) = key;
+        let rift_pair = |a: u16, b: u16| {
+            let pa = &planet.plates[a as usize];
+            pa.rift_partner == Some(b)
+                && planet.time_myr - pa.rift_born_myr < RIFT_WELD_IMMUNITY_MYR
+        };
+        if young_ocean || opening || rift_pair(x, y) || rift_pair(y, x) {
             continue;
         }
         let welded = acc.coll_len_m >= WELD_MIN_PITCHES * pitch_m
@@ -1050,12 +1068,18 @@ fn weld_step(
         if !welded && !quiet {
             continue;
         }
-        let (x, y) = key;
         let (keep, gone) = if cell_count[x as usize] >= cell_count[y as usize] {
             (x, y)
         } else {
             (y, x)
         };
+        // `gone`'s id may be reused by a later split: stale partner links to
+        // it must not grant immunity to an unrelated future plate.
+        for pl in planet.plates.iter_mut() {
+            if pl.rift_partner == Some(gone) {
+                pl.rift_partner = None;
+            }
+        }
         let mx = cell_count[keep as usize].max(1) as f64;
         let my = cell_count[gone as usize].max(1) as f64;
         let w = (planet.plates[keep as usize].euler_pole

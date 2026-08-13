@@ -75,6 +75,8 @@ mod tests {
             omega_rad_myr: w.length(),
             welded_to: None,
             accum: glam::DQuat::IDENTITY,
+            rift_partner: None,
+            rift_born_myr: f64::NEG_INFINITY,
         };
         let back = plate.velocity_m_yr(r);
         assert!((back - v).length() < 1e-6, "{back:?} vs {v:?}");

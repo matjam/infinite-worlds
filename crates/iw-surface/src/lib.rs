@@ -85,7 +85,9 @@ pub struct Ctx<'a> {
 /// on statelessness.
 #[derive(Debug, Default)]
 pub struct SurfaceProcess {
-    geom: Option<Geometry>,
+    /// Keyed by mesh FINGERPRINT (not n_cells: re-tessellation keeps the
+    /// budget, so counts collide across distinct meshes).
+    geom: Option<(u64, Geometry)>,
     hydro: Hydrology,
     glacial: GlacialScratch,
     melt_m_yr: Vec<f32>,
@@ -132,10 +134,11 @@ impl Process for SurfaceProcess {
             scratch_b,
         } = self;
 
-        if geom.as_ref().is_none_or(|g| g.n_cells != mesh.n_cells()) {
-            *geom = Some(Geometry::build(mesh));
+        let fp = mesh.fingerprint();
+        if geom.as_ref().is_none_or(|(f, _)| *f != fp) {
+            *geom = Some((fp, Geometry::build(mesh)));
         }
-        let geom = geom.as_ref().expect("geometry built above");
+        let geom = &geom.as_ref().expect("geometry built above").1;
 
         let mut c = Ctx {
             mesh,

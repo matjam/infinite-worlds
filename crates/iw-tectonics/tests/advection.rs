@@ -72,12 +72,16 @@ fn continents_translate_across_the_grid() {
             omega_rad_myr: omega,
             welded_to: None,
             accum: DQuat::IDENTITY,
+            rift_partner: None,
+            rift_born_myr: f64::NEG_INFINITY,
         },
         Plate {
             euler_pole: DVec3::Z,
             omega_rad_myr: 0.0,
             welded_to: None,
             accum: DQuat::IDENTITY,
+            rift_partner: None,
+            rift_born_myr: f64::NEG_INFINITY,
         },
     ];
 
@@ -149,12 +153,16 @@ fn divergence_leaves_an_age_gradient() {
             omega_rad_myr: omega,
             welded_to: None,
             accum: DQuat::IDENTITY,
+            rift_partner: None,
+            rift_born_myr: f64::NEG_INFINITY,
         },
         Plate {
             euler_pole: DVec3::X,
             omega_rad_myr: -omega,
             welded_to: None,
             accum: DQuat::IDENTITY,
+            rift_partner: None,
+            rift_born_myr: f64::NEG_INFINITY,
         },
     ];
     let mut total = MassLedger::default();
@@ -274,6 +282,8 @@ fn hotspots_build_chains_on_moving_plates() {
         omega_rad_myr: omega,
         welded_to: None,
         accum: DQuat::IDENTITY,
+        rift_partner: None,
+        rift_born_myr: f64::NEG_INFINITY,
     }];
     let mut total = MassLedger::default();
     let mut p = TectonicsProcess::default();

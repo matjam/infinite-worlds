@@ -309,12 +309,16 @@ fn two_continent_planet(level: u8, omega_rad_myr: f64) -> Harness {
             omega_rad_myr,
             welded_to: None,
             accum: glam::DQuat::IDENTITY,
+            rift_partner: None,
+            rift_born_myr: f64::NEG_INFINITY,
         },
         Plate {
             euler_pole: DVec3::Z,
             omega_rad_myr: 0.0,
             welded_to: None,
             accum: glam::DQuat::IDENTITY,
+            rift_partner: None,
+            rift_born_myr: f64::NEG_INFINITY,
         },
     ];
     h

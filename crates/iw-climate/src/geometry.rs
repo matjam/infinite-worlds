@@ -85,8 +85,6 @@ pub fn wind_field(mesh: &Mesh) -> Vec<Vec3> {
 /// in proportion to that projection. `rev` lets the sweep run as a gather (each
 /// output cell reads its inflows), which keeps it parallel and deterministic.
 pub(crate) struct MeshCache {
-    /// Cell count this cache was built for; a mismatch invalidates it.
-    pub n_cells: usize,
     /// Per-cell wind vector, m/s.
     pub wind: Vec<Vec3>,
     /// Outflow weight per CSR neighbour slot; the slots of one cell sum to 1
@@ -145,7 +143,6 @@ impl MeshCache {
         debug_assert!(rev.iter().all(|r| *r != u32::MAX), "asymmetric adjacency");
 
         MeshCache {
-            n_cells: n,
             wind,
             out_w,
             rev,

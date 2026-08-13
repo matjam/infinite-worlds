@@ -23,6 +23,17 @@ const ICE_SEAL_M: f32 = 10.0;
 /// lands more of the ocean's moisture on the coast and carries it further
 /// inland once it is there.
 const BASE_RAINOUT: f32 = 0.07;
+/// Rainout multiplier over land (continental convection, roughness, orography
+/// beyond the explicit lift term).
+/// Calibration note: 1.7/0.72 were tuned while the advection operator was
+/// silently broken (stale mesh cache after re-tessellation) — every knob was
+/// compensating for dead transport. With transport fixed, the bias mostly
+/// steers the global rain SHARE between land and sea (the water-balance
+/// rescale pins the total), and the un-biased physics is the honest baseline
+/// to calibrate from.
+const LAND_RAINOUT_BIAS: f32 = 1.0;
+/// Rainout multiplier over open water: maritime air holds on to its moisture.
+const OCEAN_RAINOUT_BIAS: f32 = 1.0;
 /// ITCZ convergence bonus at the equator.
 const ITCZ_GAIN: f32 = 0.30;
 /// Gaussian width of the ITCZ, degrees.
@@ -44,10 +55,12 @@ const SUBTROPICAL_PENALTY: f32 = 0.055;
 const SUBTROPICAL_DEG: f32 = 30.0;
 const SUBTROPICAL_WIDTH_DEG: f32 = 11.0;
 /// Uphill rise, in metres, that adds a full [`ORO_MAX`] of rainout.
-const ORO_SCALE_M: f32 = 2500.0;
-/// Cap on the orographic rainout bonus. Kept below 0.5 so a range sheds its
-/// moisture over several cells instead of emptying the air in one.
-const ORO_MAX: f32 = 0.40;
+const ORO_SCALE_M: f32 = 2000.0;
+/// Cap on the orographic rainout bonus. Kept near 0.5 so a range sheds its
+/// moisture over a few cells instead of emptying the air in one. (Applied
+/// per EDGE, so fine meshes climb a range in many small steps and never see
+/// the cap; only the coarse-cell case does.)
+const ORO_MAX: f32 = 0.48;
 /// Rainout fraction is clamped into this range.
 const RAINOUT_MIN: f32 = 0.02;
 const RAINOUT_MAX: f32 = 0.90;
@@ -129,8 +142,17 @@ fn sweep_schedule(mesh: &Mesh) -> (usize, Vec<f32>) {
         .iter()
         .map(|a| (a / REF_CELL_AREA_KM2).sqrt().clamp(0.05, 8.0))
         .collect();
-    let mean_width = widths.iter().sum::<f32>() / widths.len().max(1) as f32;
-    let sweeps = (SWEEPS_REF / mean_width).round().clamp(5.0, 96.0) as usize;
+    // Moisture advances one CELL per sweep, so the sweep count must serve the
+    // FINE cells (coasts, mountains — exactly where the rain matters), not
+    // the mean: sized by the mean, air makes landfall on a 20 km coastal cell
+    // and dies of old sweeps a few hundred km inland, and the continent
+    // interior reads 150 mm/yr on a planet whose land should average ~750.
+    // Rainout is per-km (see below), so extra sweeps cannot over-carry
+    // moisture across coarse regions — it decays on schedule regardless.
+    let mut sorted = widths.clone();
+    sorted.sort_unstable_by(f32::total_cmp);
+    let p10 = sorted[sorted.len() / 10].max(0.05);
+    let sweeps = (SWEEPS_REF / p10).round().clamp(5.0, 160.0) as usize;
     (sweeps, widths)
 }
 
@@ -180,23 +202,48 @@ pub(crate) fn update(planet: &mut Planet, mesh: &Mesh, cache: &MeshCache) {
                 lift += cache.out_w[a + k] * (height[j as usize] - height[i]).max(0.0);
             }
             let oro = (lift / ORO_SCALE_M).min(ORO_MAX);
-            let r_ref = (BASE_RAINOUT + oro + convergence_rainout(mesh.latlon[i][0]))
+            // Land squeezes harder than open sea: continental convection and
+            // surface roughness make moist air drop its load over land, and
+            // the reduced ocean rainout lets maritime air survive the fetch.
+            // Without the asymmetry most precipitation falls at sea and the
+            // continents run 3x drier than Earth's land mean.
+            let surface_bias = if planet.elevation_m[i] >= sea {
+                LAND_RAINOUT_BIAS
+            } else {
+                OCEAN_RAINOUT_BIAS
+            };
+            // Two different physics, two different scalings: background
+            // rainout is per-KILOMETRE travelled (exponent = cell width),
+            // but the orographic squeeze is per-EDGE — climbing this cell's
+            // rise sheds a fraction set by the CLIMB, however wide the cell
+            // is. Width-scaling the climb term diluted mountains to nothing
+            // on fine meshes and literally inverted the rain shadow.
+            let r_base = ((BASE_RAINOUT + convergence_rainout(mesh.latlon[i][0])) * surface_bias)
                 .clamp(RAINOUT_MIN, RAINOUT_MAX);
-            1.0 - (1.0 - r_ref).powf(widths[i])
+            let per_km = 1.0 - (1.0 - r_base).powf(widths[i]);
+            let per_edge = (oro * surface_bias).min(ORO_MAX);
+            (1.0 - (1.0 - per_km) * (1.0 - per_edge)).clamp(0.0, 0.95)
         })
         .collect();
 
-    // Inject once, then advect: total rainout equals total evaporation minus
-    // the moisture still airborne after the last sweep, which is discarded
-    // (dry belts are exactly the places that never condense theirs) and
-    // compensated by a global rescale below.
-    let mut q = evap.clone();
+    // Inject once, then advect — IN VOLUME (depth × area), not depth. Cells
+    // differ in area by two orders of magnitude on a Voronoi mesh: passing
+    // depths between them silently multiplies or destroys water at every size
+    // boundary (a 200 km ocean cell handing its "1400 mm" to a 20 km coastal
+    // cell would concentrate a hundredfold). Volumes conserve; the rained
+    // depth divides the area back out at the end. Airborne remainder after
+    // the last sweep is discarded (dry belts never condense theirs) and
+    // compensated by the global rescale below.
+    let mut q: Vec<f32> = (0..n)
+        .into_par_iter()
+        .map(|i| evap[i] * mesh.areas_km2[i])
+        .collect();
     let mut carry = vec![0.0f32; n];
-    let mut rain = vec![0.0f32; n];
+    let mut rain_vol = vec![0.0f32; n];
     for _ in 0..sweeps {
         carry
             .par_iter_mut()
-            .zip(rain.par_iter_mut())
+            .zip(rain_vol.par_iter_mut())
             .zip(q.par_iter())
             .zip(rain_frac.par_iter())
             .for_each(|(((c, out), qi), r)| {
@@ -221,9 +268,8 @@ pub(crate) fn update(planet: &mut Planet, mesh: &Mesh, cache: &MeshCache) {
     let mut evap_total = 0.0f64;
     let mut rain_total = 0.0f64;
     for i in 0..n {
-        let area = mesh.areas_km2[i] as f64;
-        evap_total += evap[i] as f64 * area;
-        rain_total += rain[i] as f64 * area;
+        evap_total += evap[i] as f64 * mesh.areas_km2[i] as f64;
+        rain_total += rain_vol[i] as f64;
     }
     let scale = if rain_total > 0.0 {
         (evap_total / rain_total) as f32
@@ -235,8 +281,9 @@ pub(crate) fn update(planet: &mut Planet, mesh: &Mesh, cache: &MeshCache) {
     planet
         .precip_mm_yr
         .par_iter_mut()
-        .zip(rain.par_iter())
-        .for_each(|(p, r)| {
-            *p = ((1.0 - PRECIP_INERTIA) * (r * gain) + PRECIP_INERTIA * *p).max(0.0);
+        .enumerate()
+        .for_each(|(i, p)| {
+            let depth = rain_vol[i] / mesh.areas_km2[i].max(1.0);
+            *p = ((1.0 - PRECIP_INERTIA) * (depth * gain) + PRECIP_INERTIA * *p).max(0.0);
         });
 }

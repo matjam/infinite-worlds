@@ -270,3 +270,46 @@ fn dump_phase1_crust() {
         100.0 * h.continental_cells() as f32 / h.planet.n_cells() as f32
     );
 }
+
+/// Probe: per-plate area/continental fractions through the drift era, to see
+/// why rifting does or does not fire on the continental plate.
+#[test]
+#[ignore]
+fn probe_drift_plate_stats() {
+    let mut h = Harness::level(5);
+    let mut p = TectonicsProcess::new();
+    h.run_crustal_formation(&mut p);
+    for block in 0..20 {
+        h.run(&mut p, Phase::Drift, 20);
+        let np = h.planet.plates.len();
+        let n = h.planet.n_cells();
+        let mut area = vec![0usize; np];
+        let mut cont = vec![0usize; np];
+        for c in 0..n {
+            let pl = h.planet.plate_id[c] as usize;
+            if pl < np {
+                area[pl] += 1;
+                if h.planet.crust_type[c] == CrustType::Continental {
+                    cont[pl] += 1;
+                }
+            }
+        }
+        let t = h.planet.time_myr;
+        let mut rows: Vec<String> = (0..np)
+            .filter(|&i| area[i] > 0)
+            .map(|i| {
+                format!(
+                    "p{i}: {:.2}A {:.2}C",
+                    area[i] as f64 / n as f64,
+                    if area[i] > 0 {
+                        cont[i] as f64 / area[i] as f64
+                    } else {
+                        0.0
+                    }
+                )
+            })
+            .collect();
+        rows.sort();
+        println!("t={t:.0} block={block} plates={np}: {}", rows.join(" | "));
+    }
+}

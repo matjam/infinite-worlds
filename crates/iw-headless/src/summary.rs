@@ -21,6 +21,16 @@ pub struct Summary {
     pub config: PlanetConfig,
     /// Area-weighted fraction of the surface at or above sea level.
     pub land_fraction: f64,
+    /// Area-weighted means over land cells (diagnostics for climate tuning).
+    pub land_mean_temp_c: f32,
+    pub land_mean_precip_mm_yr: f32,
+    /// Area-weighted land precipitation percentiles (p10/p50/p90): the mean
+    /// alone hides a broken distribution (a few drenched cells + desert
+    /// everywhere else averages to "fine").
+    pub land_precip_p10_mm_yr: f32,
+    pub land_precip_p50_mm_yr: f32,
+    pub land_precip_p90_mm_yr: f32,
+    pub land_mean_elev_above_sea_m: f32,
     /// Sea level, meters.
     pub sea_level_m: f32,
     /// Minimum elevation, meters.
@@ -55,13 +65,43 @@ pub fn compute_summary(planet: &Planet, mesh: &Mesh, runtime_secs: f64) -> Summa
     let mut land_area = 0.0f64;
     let mut elevation_min = f32::INFINITY;
     let mut elevation_max = f32::NEG_INFINITY;
-    for (&e, &area) in planet.elevation_m.iter().zip(areas.iter()) {
+    let mut land_t = 0.0f64;
+    let mut land_p = 0.0f64;
+    let mut land_e = 0.0f64;
+    for (i, (&e, &area)) in planet.elevation_m.iter().zip(areas.iter()).enumerate() {
         if e >= planet.sea_level_m {
             land_area += area as f64;
+            land_t += planet.temperature_c[i] as f64 * area as f64;
+            land_p += planet.precip_mm_yr[i] as f64 * area as f64;
+            land_e += (e - planet.sea_level_m) as f64 * area as f64;
         }
         elevation_min = elevation_min.min(e);
         elevation_max = elevation_max.max(e);
     }
+    let la = land_area.max(1.0);
+    let (land_mean_temp_c, land_mean_precip_mm_yr, land_mean_elev_above_sea_m) = (
+        (land_t / la) as f32,
+        (land_p / la) as f32,
+        (land_e / la) as f32,
+    );
+
+    let mut land_cells: Vec<usize> = (0..n)
+        .filter(|&i| planet.elevation_m[i] >= planet.sea_level_m)
+        .collect();
+    land_cells.sort_by(|&a, &b| planet.precip_mm_yr[a].total_cmp(&planet.precip_mm_yr[b]));
+    let precip_pct = |q: f64| -> f32 {
+        let target = q * land_area;
+        let mut cum = 0.0f64;
+        for &i in &land_cells {
+            cum += areas[i] as f64;
+            if cum >= target {
+                return planet.precip_mm_yr[i];
+            }
+        }
+        land_cells.last().map_or(0.0, |&i| planet.precip_mm_yr[i])
+    };
+    let (land_precip_p10_mm_yr, land_precip_p50_mm_yr, land_precip_p90_mm_yr) =
+        (precip_pct(0.10), precip_pct(0.50), precip_pct(0.90));
     let land_fraction = if total_area > 0.0 {
         land_area / total_area
     } else {
@@ -117,6 +157,12 @@ pub fn compute_summary(planet: &Planet, mesh: &Mesh, runtime_secs: f64) -> Summa
         level: planet.config.subdivision_level,
         config: planet.config.clone(),
         land_fraction,
+        land_mean_temp_c,
+        land_mean_precip_mm_yr,
+        land_precip_p10_mm_yr,
+        land_precip_p50_mm_yr,
+        land_precip_p90_mm_yr,
+        land_mean_elev_above_sea_m,
         sea_level_m: planet.sea_level_m,
         elevation_min_m: elevation_min,
         elevation_max_m: elevation_max,

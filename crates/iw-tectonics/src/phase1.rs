@@ -146,6 +146,8 @@ fn seed_supercontinent(
             omega_rad_myr: omega,
             welded_to: None,
             accum: glam::DQuat::IDENTITY,
+            rift_partner: None,
+            rift_born_myr: f64::NEG_INFINITY,
         });
     }
 
@@ -339,6 +341,8 @@ pub(crate) fn partition_into_plates(
             omega_rad_myr: omega,
             welded_to: None,
             accum: glam::DQuat::IDENTITY,
+            rift_partner: None,
+            rift_born_myr: f64::NEG_INFINITY,
         });
     }
     for &s in &extra_seeds {
@@ -354,6 +358,8 @@ pub(crate) fn partition_into_plates(
             omega_rad_myr: omega,
             welded_to: None,
             accum: glam::DQuat::IDENTITY,
+            rift_partner: None,
+            rift_born_myr: f64::NEG_INFINITY,
         });
     }
 

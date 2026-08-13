@@ -297,9 +297,19 @@ impl Genesis {
             shape
         };
 
-        // The supercontinent, placed by its cap pole.
+        // The supercontinent, placed by its cap pole — constrained to low
+        // latitudes (|lat| <= 35 deg). Supercontinents assemble where
+        // subduction gathers them, and Earth's (Rodinia, Pangaea) straddled
+        // the equator; a pole-centred one also freezes the planet into a
+        // dry snowball where every biome but tundra/ice/desert vanishes.
         let main = make_shape(cap_radius_m(main_frac), &mut rng);
-        let main_pole = random_unit_dir(&mut rng);
+        let main_pole = {
+            let lon = rng.random_range(0.0f32..std::f32::consts::TAU);
+            let max_sin = 35.0f32.to_radians().sin();
+            let sin_lat = rng.random_range(-max_sin..max_sin);
+            let cos_lat = (1.0 - sin_lat * sin_lat).sqrt();
+            Vec3::new(cos_lat * lon.cos(), cos_lat * lon.sin(), sin_lat)
+        };
         let main_frame = Quat::from_rotation_arc(main_pole, Vec3::Z);
         let mut masses = vec![(main, main_frame)];
 

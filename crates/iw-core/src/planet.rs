@@ -25,6 +25,15 @@ pub struct Plate {
     /// the implied surface displacement reaches a cell pitch. Serialized so
     /// checkpoint resume reproduces the remap schedule exactly.
     pub accum: DQuat,
+    /// The plate this one rifted away from, while the rift is young. A fresh
+    /// CONTINENTAL rift pair has no oceanic seam yet, so the age-based weld
+    /// immunity cannot see it — without this explicit marker the weld pass
+    /// recaptured every continental breakup within ~20 Myr and Pangaea never
+    /// broke up. Cleared when the partner is welded away or the immunity
+    /// window lapses.
+    pub rift_partner: Option<u16>,
+    /// Simulation time (Myr) when [`Plate::rift_partner`] was set.
+    pub rift_born_myr: f64,
 }
 
 impl Plate {

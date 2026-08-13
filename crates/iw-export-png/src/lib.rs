@@ -26,6 +26,9 @@ pub enum MapKind {
     Biome,
     /// Fixed categorical palette keyed off the topmost rock in each column.
     TopRock,
+    /// Log-scaled precipitation ramp (diagnostic layer for climate tuning);
+    /// ocean cells are darkened so the land pattern reads.
+    Precip,
 }
 
 /// Sub-pixel sample offsets (fraction of a pixel) for 2x2 supersampling.
@@ -127,6 +130,29 @@ fn color_for(what: MapKind, planet: &Planet, cell: u32) -> [u8; 3] {
         }
         MapKind::Biome => biome_color(planet.biome[cell as usize]),
         MapKind::TopRock => rock_color(planet.columns.top_rock(cell)),
+        MapKind::Precip => precip_color(
+            planet.precip_mm_yr[cell as usize],
+            planet.elevation_m[cell as usize] >= planet.sea_level_m,
+        ),
+    }
+}
+
+/// Diagnostic precipitation ramp: log scale from 30 mm/yr (deep desert,
+/// near-black red) through yellow (~250, the desert threshold) and green
+/// (~750, Earth's land mean) to blue (3000+). Ocean is shown dimmed.
+pub fn precip_color(mm_yr: f32, is_land: bool) -> [u8; 3] {
+    let t = ((mm_yr.max(1.0) / 30.0).ln() / (3000.0f32 / 30.0).ln()).clamp(0.0, 1.0);
+    let c = if t < 0.33 {
+        lerp_color([0x40, 0x10, 0x08], [0xe8, 0xd4, 0x30], t / 0.33)
+    } else if t < 0.66 {
+        lerp_color([0xe8, 0xd4, 0x30], [0x2f, 0x9e, 0x44], (t - 0.33) / 0.33)
+    } else {
+        lerp_color([0x2f, 0x9e, 0x44], [0x1c, 0x4f, 0xd6], (t - 0.66) / 0.34)
+    };
+    if is_land {
+        c
+    } else {
+        [c[0] / 3, c[1] / 3, c[2] / 3]
     }
 }
 
@@ -267,6 +293,13 @@ impl MapExporter for PngExporter {
             mesh,
             MapKind::TopRock,
             &out_dir.join("toprock.png"),
+            DEFAULT_EXPORT_WIDTH,
+        )?;
+        export_equirect(
+            planet,
+            mesh,
+            MapKind::Precip,
+            &out_dir.join("precip.png"),
             DEFAULT_EXPORT_WIDTH,
         )?;
         Ok(())

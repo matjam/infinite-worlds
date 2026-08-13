@@ -94,9 +94,13 @@ use geometry::MeshCache;
 /// Holds only mesh-derived and mask-derived caches; see the crate docs.
 #[derive(Default)]
 pub struct ClimateProcess {
-    geometry: Option<MeshCache>,
-    /// (land/sea mask hash, distance-to-ocean field).
-    ocean_dist: Option<(u64, Vec<u8>)>,
+    /// (mesh fingerprint, advection operator). Keyed on the FINGERPRINT, not
+    /// n_cells: era re-tessellation swaps the mesh at the same budget, and a
+    /// surviving cache indexes a foreign CSR adjacency.
+    geometry: Option<(u64, MeshCache)>,
+    /// (land/sea mask hash, mesh fingerprint, distance-to-ocean field). The
+    /// Dijkstra walks mesh adjacency, so the mesh identity is part of the key.
+    ocean_dist: Option<(u64, u64, Vec<u8>)>,
 }
 
 impl ClimateProcess {
@@ -106,26 +110,28 @@ impl ClimateProcess {
     }
 
     fn geometry(&mut self, mesh: &Mesh) -> &MeshCache {
+        let fp = mesh.fingerprint();
         let stale = match &self.geometry {
-            Some(g) => g.n_cells != mesh.n_cells(),
+            Some((f, _)) => *f != fp,
             None => true,
         };
         if stale {
-            self.geometry = Some(MeshCache::build(mesh));
+            self.geometry = Some((fp, MeshCache::build(mesh)));
         }
-        self.geometry.as_ref().expect("geometry cache built")
+        &self.geometry.as_ref().expect("geometry cache built").1
     }
 
     fn ocean_dist(&mut self, planet: &Planet, mesh: &Mesh) -> &[u8] {
         let hash = temperature::ocean_mask_hash(planet);
+        let fp = mesh.fingerprint();
         let stale = match &self.ocean_dist {
-            Some((h, d)) => *h != hash || d.len() != planet.n_cells(),
+            Some((h, f, _)) => *h != hash || *f != fp,
             None => true,
         };
         if stale {
-            self.ocean_dist = Some((hash, distance_to_ocean_cells(planet, mesh)));
+            self.ocean_dist = Some((hash, fp, distance_to_ocean_cells(planet, mesh)));
         }
-        &self.ocean_dist.as_ref().expect("distance cache built").1
+        &self.ocean_dist.as_ref().expect("distance cache built").2
     }
 }
 

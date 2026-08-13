@@ -115,9 +115,12 @@ pub const CONTINENTAL_DENSITY_KG_M3: f32 = 2_700.0;
 ///
 /// Calibration: 35 km is the isostatic anchor for +800 m, so the old value put
 /// the *outermost* ring of every craton a full 800 m above the geoid and the
-/// planet had no drowned margin anywhere. 31 km floats at ~-260 m, so the outer
-/// couple of cells of a craton start life as shelf.
-pub const CRATON_EDGE_THICKNESS_M: f32 = 31_000.0;
+/// planet had no drowned margin anywhere. 31 km floats at ~-260 m — but once
+/// breakup genuinely fragments the supercontinent (rift-pair weld immunity),
+/// every fragment has margins on all sides and at 31 km the flooded-shelf
+/// share pulled land down to ~19% of the surface. 33 km lifts margins ~250 m:
+/// still a drowned outer ring, land back near Earth's ~29%.
+pub const CRATON_EDGE_THICKNESS_M: f32 = 33_000.0;
 /// Continental crust thickness at a craton's centre, metres.
 ///
 /// Calibration: 45 km floats at +2.6 km, which is a plateau, not a shield. Real
@@ -145,7 +148,9 @@ pub const MAX_PLATES: usize = 64;
 /// Tectonics as a [`Process`]. Stateless with respect to the simulation: the
 /// struct holds only mesh-derived caches and scratch buffers.
 pub struct TectonicsProcess {
-    cache: Option<MeshCache>,
+    /// Keyed by mesh FINGERPRINT (not n_cells: re-tessellation keeps the
+    /// budget, so counts collide across distinct meshes).
+    cache: Option<(u64, MeshCache)>,
     genesis: Option<craton::Genesis>,
     scratch: Scratch,
 }
@@ -171,7 +176,6 @@ impl TectonicsProcess {
 /// changes. Nothing here is simulation *state* — every field is a pure function
 /// of `(mesh, seed)`, so rebuilding it in a fresh process instance is exact.
 pub(crate) struct MeshCache {
-    pub(crate) n_cells: usize,
     /// Seed the seed-dependent fields below were built for.
     pub(crate) seed: u64,
     /// Mean centre-to-centre cell spacing, metres.
@@ -200,7 +204,6 @@ impl MeshCache {
             })
             .collect();
         MeshCache {
-            n_cells: mesh.n_cells(),
             seed,
             pitch_m: geom::cell_pitch_m(mesh),
             total_area_m2: area_m2.iter().sum(),
@@ -252,14 +255,15 @@ impl Process for TectonicsProcess {
             "planet/mesh cell count mismatch"
         );
         let seed = planet.config.seed;
+        let fp = mesh.fingerprint();
         if self
             .cache
             .as_ref()
-            .is_none_or(|c| c.n_cells != mesh.n_cells() || c.seed != seed)
+            .is_none_or(|(f, c)| *f != fp || c.seed != seed)
         {
-            self.cache = Some(MeshCache::build(mesh, seed));
+            self.cache = Some((fp, MeshCache::build(mesh, seed)));
         }
-        let cache = self.cache.as_ref().expect("cache just built");
+        let cache = &self.cache.as_ref().expect("cache just built").1;
         self.scratch.prepare(mesh.n_cells());
 
         // Only SUTURE survives a step: it records ancient seams that rifting
