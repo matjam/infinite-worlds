@@ -7,7 +7,7 @@ use crate::camera::ViewMode;
 
 /// Data layers offered by the placeholder selector.
 pub const LAYERS: [&str; 8] = [
-    "Beauty (placeholder)",
+    "Beauty",
     "Elevation",
     "Biomes",
     "Plates",

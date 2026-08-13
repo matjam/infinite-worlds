@@ -1,10 +1,13 @@
 #version 450
-// Fullscreen-triangle starfield background. Emits the per-pixel view ray by
-// unprojecting two points along it; drawn first with depth writes disabled.
+// Fullscreen-triangle sky background (starfield + atmospheric halo). Emits the
+// per-pixel view ray by unprojecting two points along it; drawn first with
+// depth writes disabled, so the globe covers whatever it occludes.
 
 layout(push_constant) uniform Push {
     mat4 inv_view_proj;
-    vec4 params; // x = seed, y = brightness, z/w unused
+    vec4 params; // x = seed, y = brightness, z = planet radius km, w unused
+    vec4 cam;    // xyz = camera position (km), w = halo strength 0..1
+    vec4 sun;    // xyz = sun direction (unit, world), w unused
 } pc;
 
 layout(location = 0) out vec3 v_dir;

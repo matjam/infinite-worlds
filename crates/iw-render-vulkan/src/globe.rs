@@ -1,11 +1,18 @@
-//! The globe pipeline: static per-chunk geometry, dynamic per-cell data, and
-//! the starfield background pass.
+//! The globe pipeline: static per-chunk geometry, dynamic per-cell data, the
+//! sky (starfield + atmospheric halo) pass and the optional cloud shell.
 //!
 //! Geometry is built once from the `Mesh` (a triangle fan per cell over its
 //! corners) into one vertex and one index buffer, with a draw range per chunk
-//! for culling. Per-cell elevation and colour live in a storage buffer indexed
-//! by the cell id carried on every vertex, so a data update never rebuilds
-//! geometry.
+//! for culling. Per-cell elevation, colour and beauty shading inputs live in a
+//! storage buffer indexed by the cell id carried on every vertex, so a data
+//! update never rebuilds geometry.
+//!
+//! The cloud shell is a separate, static icosphere (see [`CLOUD_SHELL_LEVEL`])
+//! whose per-vertex coverage is refilled from the CPU; its structure comes
+//! from noise in the fragment stage, so it does not inherit the planet's cell
+//! resolution.
+
+use std::collections::HashMap;
 
 use anyhow::{anyhow, Result};
 use ash::vk;
@@ -24,6 +31,11 @@ pub const FRAMES_IN_FLIGHT: usize = 2;
 /// Vertical span assumed for culling and Mercator depth normalisation, metres.
 const ELEV_NORM_M: f32 = 9_000.0;
 
+/// Icosahedron subdivisions of the cloud shell: 10242 vertices, 20480
+/// triangles. Fine enough that the interpolated coverage field shows no
+/// facets, coarse enough to cost nothing next to the planet itself.
+pub const CLOUD_SHELL_LEVEL: u32 = 5;
+
 /// One corner of one cell. `cells[0]` owns the corner and supplies the flat
 /// colour; `cells[1..3]` are the other cells sharing it (repeating `cells[0]`
 /// where a corner is shared by fewer than three). Displacement uses the mean
@@ -35,12 +47,88 @@ struct GlobeVertex {
     cells: [u32; 3],
 }
 
-/// Per-cell dynamic data, std430-compatible (8 byte stride).
+/// What a cell's surface is made of, for the beauty shader's water handling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u8)]
+pub enum SurfaceKind {
+    /// Anything above sea level, ice included.
+    #[default]
+    Land = 0,
+    /// Open ocean: full-strength sun glint, sky reflection scaled by depth.
+    Ocean = 1,
+    /// Inland water: a smaller, softer highlight.
+    Lake = 2,
+}
+
+/// Per-cell shading inputs for the beauty view. Everything the lit shader
+/// needs beyond elevation and albedo; see `crates/iw-app/src/beauty.rs` for
+/// how it is derived from a snapshot.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CellShade {
+    /// Elevation gradient in the cell's own tangent basis, metres per metre.
+    /// Reconstructing the normal from a gradient (rather than baking one) keeps
+    /// the shading exact under any vertical exaggeration.
+    pub grad_east: f32,
+    /// See [`CellShade::grad_east`].
+    pub grad_north: f32,
+    pub kind: SurfaceKind,
+    /// Position on the ocean depth ramp, 0 at the shoreline, 1 at the abyss.
+    pub depth_t: f32,
+    /// Ice cover fraction, 0..1. Kills the glint and the water sky term.
+    pub ice_t: f32,
+}
+
+/// Per-cell dynamic data, std430-compatible (16 byte stride).
 #[repr(C)]
 #[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
 struct CellGpu {
     elevation_m: f32,
     color_rgba8: u32,
+    /// Two halves: d elevation / d east, d elevation / d north (m per m).
+    gradient: u32,
+    /// Byte 0 surface kind, byte 1 depth ramp, byte 2 ice, byte 3 reserved.
+    material: u32,
+}
+
+/// Pack two floats as IEEE binary16, matching GLSL `unpackHalf2x16`.
+fn pack_half2(x: f32, y: f32) -> u32 {
+    (f16_bits(x) as u32) | ((f16_bits(y) as u32) << 16)
+}
+
+/// f32 -> binary16 bits, round half up, saturating on overflow.
+fn f16_bits(v: f32) -> u16 {
+    let bits = v.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exp = ((bits >> 23) & 0xff) as i32;
+    let mantissa = bits & 0x007f_ffff;
+    if exp == 0xff {
+        // Inf or NaN: keep NaN a NaN, clamp infinities to the largest finite
+        // half (the shader only ever divides these, never inspects them).
+        return sign | if mantissa != 0 { 0x7e00 } else { 0x7bff };
+    }
+    let unbiased = exp - 127 + 15;
+    if unbiased >= 0x1f {
+        return sign | 0x7bff; // saturate rather than produce infinity
+    }
+    if unbiased <= 0 {
+        // Subnormal half (or zero): shift the implicit 1 back in.
+        if unbiased < -10 {
+            return sign;
+        }
+        let m = mantissa | 0x0080_0000;
+        let shift = (14 - unbiased) as u32;
+        let half = (m >> shift) + ((m >> (shift - 1)) & 1);
+        return sign | half as u16;
+    }
+    let half = ((unbiased as u32) << 10) | (mantissa >> 13);
+    let round = (mantissa >> 12) & 1;
+    sign | (half + round) as u16
+}
+
+/// Pack four 0..1 values into RGBA8 the way GLSL `unpackUnorm4x8` reads them.
+fn pack_unorm4(x: f32, y: f32, z: f32, w: f32) -> u32 {
+    let b = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
+    b(x) | (b(y) << 8) | (b(z) << 16) | (b(w) << 24)
 }
 
 /// Per-cell static data: the cell centre's lat/lon, used to resolve the
@@ -52,6 +140,8 @@ struct CellStaticGpu {
     lon_rad: f32,
 }
 
+/// Exactly 128 bytes: the minimum `maxPushConstantsSize` every Vulkan
+/// implementation is required to support.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct GlobePush {
@@ -60,7 +150,9 @@ struct GlobePush {
     cam_pos_exag: [f32; 4],
     /// x = radius_km, y = base_offset_m, z = elevation normaliser, w = centre lon.
     params: [f32; 4],
-    /// x = 0 globe / 1 mercator.
+    /// xyz = sun direction (unit), w = atmosphere fade 0..1.
+    sun: [f32; 4],
+    /// x = 0 globe / 1 mercator, y = 1 when beauty shading is on.
     flags: [u32; 4],
 }
 
@@ -68,8 +160,24 @@ struct GlobePush {
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct StarPush {
     inv_view_proj: [f32; 16],
-    /// x = seed, y = brightness.
+    /// x = seed, y = brightness, z = planet radius km.
     params: [f32; 4],
+    /// xyz = camera position (km), w = halo strength 0..1.
+    cam: [f32; 4],
+    /// xyz = sun direction (unit).
+    sun: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct CloudPush {
+    view_proj: [f32; 16],
+    /// xyz = camera position (km), w = planet radius (km).
+    cam_radius: [f32; 4],
+    /// xyz = sun direction (unit), w = deck rotation phase (rad).
+    sun_phase: [f32; 4],
+    /// x = opacity fade 0..1, y = noise seed.
+    misc: [f32; 4],
 }
 
 /// A chunk's draw range and bounding cone.
@@ -96,6 +204,43 @@ pub struct GlobeParams {
     pub cull: bool,
     pub star_seed: f32,
     pub star_brightness: f32,
+    /// Lit beauty view (relief shading, glint, limb) instead of the flat
+    /// data-layer look.
+    pub beauty: bool,
+    /// Unit vector towards the sun; see [`crate::beauty::sun_direction`].
+    pub sun_dir: Vec3,
+    /// Strength of the atmospheric halo and limb, 0..1; see
+    /// [`crate::beauty::haze_fade`].
+    pub atmosphere: f32,
+    /// Opacity of the cloud shell, 0..1. Zero skips the pass entirely.
+    pub cloud_opacity: f32,
+    /// Cloud deck rotation phase, radians.
+    pub cloud_phase_rad: f32,
+    /// Seed offset for the cloud noise, so two planets get different weather.
+    pub cloud_seed: f32,
+}
+
+impl Default for GlobeParams {
+    fn default() -> Self {
+        GlobeParams {
+            view_proj: Mat4::IDENTITY,
+            camera_pos_km: Vec3::ZERO,
+            exaggeration: 1.0,
+            base_offset_m: 0.0,
+            radius_km: iw_mesh::EARTH_RADIUS_KM,
+            mode: ViewMode::Globe,
+            center_lon_rad: 0.0,
+            cull: true,
+            star_seed: 1.0,
+            star_brightness: 1.0,
+            beauty: false,
+            sun_dir: Vec3::Z,
+            atmosphere: 1.0,
+            cloud_opacity: 0.0,
+            cloud_phase_rad: 0.0,
+            cloud_seed: 0.0,
+        }
+    }
 }
 
 /// Statistics from the last recorded frame.
@@ -117,6 +262,14 @@ pub struct GlobeRenderer {
     staging: Vec<Buffer>,
     dirty: [bool; FRAMES_IN_FLIGHT],
     pending: Vec<CellGpu>,
+    shell_dirs: Vec<Vec3>,
+    shell_vertices: Option<Buffer>,
+    shell_indices: Option<Buffer>,
+    shell_index_count: u32,
+    coverage_buffers: Vec<Buffer>,
+    coverage_staging: Vec<Buffer>,
+    coverage_dirty: [bool; FRAMES_IN_FLIGHT],
+    coverage_pending: Vec<f32>,
     descriptor_pool: vk::DescriptorPool,
     descriptor_layout: vk::DescriptorSetLayout,
     descriptor_sets: Vec<vk::DescriptorSet>,
@@ -124,6 +277,9 @@ pub struct GlobeRenderer {
     pipeline: vk::Pipeline,
     star_layout: vk::PipelineLayout,
     star_pipeline: vk::Pipeline,
+    halo_pipeline: vk::Pipeline,
+    cloud_layout: vk::PipelineLayout,
+    cloud_pipeline: vk::Pipeline,
     pub stats: DrawStats,
 }
 
@@ -138,6 +294,8 @@ const GLOBE_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/globe.vert.s
 const GLOBE_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/globe.frag.spv"));
 const STAR_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/star.vert.spv"));
 const STAR_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/star.frag.spv"));
+const CLOUD_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cloud.vert.spv"));
+const CLOUD_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cloud.frag.spv"));
 
 impl GlobeRenderer {
     /// Create the pipelines and descriptor objects. Geometry arrives later via
@@ -155,6 +313,13 @@ impl GlobeRenderer {
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::VERTEX),
+            // Cloud shell coverage. Lives in the same set so the cloud pass can
+            // reuse the layout the globe pass already binds.
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(2)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::VERTEX),
         ];
         let descriptor_layout = unsafe {
             device.create_descriptor_set_layout(
@@ -164,7 +329,7 @@ impl GlobeRenderer {
         }?;
         let pool_sizes = [vk::DescriptorPoolSize::default()
             .ty(vk::DescriptorType::STORAGE_BUFFER)
-            .descriptor_count(2 * FRAMES_IN_FLIGHT as u32)];
+            .descriptor_count(3 * FRAMES_IN_FLIGHT as u32)];
         let descriptor_pool = unsafe {
             device.create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::default()
@@ -183,8 +348,10 @@ impl GlobeRenderer {
         }?;
 
         let set_layouts = [descriptor_layout];
+        // The fragment stage reads the sun, camera and flags out of the same
+        // block, so the range covers both stages.
         let push_ranges = [vk::PushConstantRange::default()
-            .stage_flags(vk::ShaderStageFlags::VERTEX)
+            .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
             .offset(0)
             .size(std::mem::size_of::<GlobePush>() as u32)];
         let pipeline_layout = unsafe {
@@ -205,9 +372,59 @@ impl GlobeRenderer {
                 None,
             )
         }?;
+        let cloud_ranges = [vk::PushConstantRange::default()
+            .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
+            .offset(0)
+            .size(std::mem::size_of::<CloudPush>() as u32)];
+        let cloud_layout = unsafe {
+            device.create_pipeline_layout(
+                &vk::PipelineLayoutCreateInfo::default()
+                    .set_layouts(&set_layouts)
+                    .push_constant_ranges(&cloud_ranges),
+                None,
+            )
+        }?;
 
         let pipeline = create_globe_pipeline(gpu, render_pass, pipeline_layout)?;
-        let star_pipeline = create_star_pipeline(gpu, render_pass, star_layout)?;
+        let star_pipeline = create_star_pipeline(gpu, render_pass, star_layout, false)?;
+        let halo_pipeline = create_star_pipeline(gpu, render_pass, star_layout, true)?;
+        let cloud_pipeline = create_cloud_pipeline(gpu, render_pass, cloud_layout)?;
+
+        // The cloud shell never changes; only its coverage does.
+        let (shell_dirs, shell_indices_cpu) = icosphere(CLOUD_SHELL_LEVEL);
+        let shell_vertices = upload_device_local(
+            gpu,
+            &shell_dirs.iter().map(|d| d.to_array()).collect::<Vec<_>>(),
+            vk::BufferUsageFlags::VERTEX_BUFFER,
+            "cloud shell vertices",
+        )?;
+        let shell_index_count = shell_indices_cpu.len() as u32;
+        let shell_indices = upload_device_local(
+            gpu,
+            &shell_indices_cpu,
+            vk::BufferUsageFlags::INDEX_BUFFER,
+            "cloud shell indices",
+        )?;
+        let coverage_bytes = (shell_dirs.len() * std::mem::size_of::<f32>()) as u64;
+        let mut coverage_buffers = Vec::with_capacity(FRAMES_IN_FLIGHT);
+        let mut coverage_staging = Vec::with_capacity(FRAMES_IN_FLIGHT);
+        for _ in 0..FRAMES_IN_FLIGHT {
+            coverage_buffers.push(Buffer::new(
+                gpu,
+                coverage_bytes,
+                vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+                MemoryLocation::GpuOnly,
+                "cloud coverage",
+            )?);
+            coverage_staging.push(Buffer::new(
+                gpu,
+                coverage_bytes,
+                vk::BufferUsageFlags::TRANSFER_SRC,
+                MemoryLocation::CpuToGpu,
+                "cloud coverage staging",
+            )?);
+        }
+        let coverage_pending = vec![0.0f32; shell_dirs.len()];
 
         Ok(GlobeRenderer {
             n_cells: 0,
@@ -219,6 +436,14 @@ impl GlobeRenderer {
             staging: Vec::new(),
             dirty: [false; FRAMES_IN_FLIGHT],
             pending: Vec::new(),
+            shell_dirs,
+            shell_vertices: Some(shell_vertices),
+            shell_indices: Some(shell_indices),
+            shell_index_count,
+            coverage_buffers,
+            coverage_staging,
+            coverage_dirty: [true; FRAMES_IN_FLIGHT],
+            coverage_pending,
             descriptor_pool,
             descriptor_layout,
             descriptor_sets,
@@ -226,6 +451,9 @@ impl GlobeRenderer {
             pipeline,
             star_layout,
             star_pipeline,
+            halo_pipeline,
+            cloud_layout,
+            cloud_pipeline,
             stats: DrawStats::default(),
         })
     }
@@ -360,6 +588,9 @@ impl GlobeRenderer {
             let statics_info = [vk::DescriptorBufferInfo::default()
                 .buffer(self.statics.as_ref().unwrap().handle)
                 .range(vk::WHOLE_SIZE)];
+            let coverage_info = [vk::DescriptorBufferInfo::default()
+                .buffer(self.coverage_buffers[i].handle)
+                .range(vk::WHOLE_SIZE)];
             let writes = [
                 vk::WriteDescriptorSet::default()
                     .dst_set(self.descriptor_sets[i])
@@ -371,6 +602,11 @@ impl GlobeRenderer {
                     .dst_binding(1)
                     .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                     .buffer_info(&statics_info),
+                vk::WriteDescriptorSet::default()
+                    .dst_set(self.descriptor_sets[i])
+                    .dst_binding(2)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .buffer_info(&coverage_info),
             ];
             unsafe { gpu.device.update_descriptor_sets(&writes, &[]) };
         }
@@ -380,10 +616,23 @@ impl GlobeRenderer {
         Ok(())
     }
 
-    /// Replace the per-cell elevation and colour. Cheap and non-blocking:
-    /// the data is staged per frame in flight, so this may be called at the
-    /// snapshot rate (up to ~10 Hz) without stalling the GPU.
+    /// Replace the per-cell elevation and colour, leaving the beauty shading
+    /// inputs flat (no relief, everything treated as land). This is what the
+    /// data layers want: their palettes are read off the screen.
     pub fn update_cells(&mut self, elevation_m: &[f32], color_rgba8: &[[u8; 4]]) -> Result<()> {
+        self.update_cells_shaded(elevation_m, color_rgba8, None)
+    }
+
+    /// Replace the per-cell elevation, colour and (optionally) the beauty
+    /// shading inputs. Cheap and non-blocking: the data is staged per frame in
+    /// flight, so this may be called at the snapshot rate (up to ~10 Hz)
+    /// without stalling the GPU.
+    pub fn update_cells_shaded(
+        &mut self,
+        elevation_m: &[f32],
+        color_rgba8: &[[u8; 4]],
+        shade: Option<&[CellShade]>,
+    ) -> Result<()> {
         if self.n_cells == 0 {
             return Ok(());
         }
@@ -395,62 +644,151 @@ impl GlobeRenderer {
                 color_rgba8.len()
             ));
         }
-        for (dst, (e, c)) in self
+        if let Some(shade) = shade {
+            if shade.len() != self.n_cells {
+                return Err(anyhow!(
+                    "update_cells: expected {} cells, got {} shading records",
+                    self.n_cells,
+                    shade.len()
+                ));
+            }
+        }
+        for (i, (dst, (e, c))) in self
             .pending
             .iter_mut()
             .zip(elevation_m.iter().zip(color_rgba8.iter()))
+            .enumerate()
         {
             dst.elevation_m = *e;
             dst.color_rgba8 = u32::from_le_bytes(*c);
+            match shade {
+                Some(s) => {
+                    let s = s[i];
+                    dst.gradient = pack_half2(s.grad_east, s.grad_north);
+                    dst.material =
+                        pack_unorm4(s.kind as u8 as f32 / 255.0, s.depth_t, s.ice_t, 0.0);
+                }
+                None => {
+                    dst.gradient = 0;
+                    dst.material = 0;
+                }
+            }
         }
         self.dirty = [true; FRAMES_IN_FLIGHT];
         Ok(())
     }
 
-    /// Record the pending cell-data copy for `frame`, if any.
-    pub fn record_uploads(&mut self, gpu: &Gpu, cb: vk::CommandBuffer, frame: usize) -> Result<()> {
-        if !self.dirty[frame] || self.cell_buffers.is_empty() {
-            return Ok(());
+    /// Unit directions of the cloud shell's vertices, in planet coordinates.
+    /// The caller samples its coverage field at these points and hands the
+    /// result back through [`GlobeRenderer::update_cloud_coverage`].
+    pub fn cloud_shell_dirs(&self) -> &[Vec3] {
+        &self.shell_dirs
+    }
+
+    /// Replace the per-shell-vertex cloud coverage (0..1).
+    pub fn update_cloud_coverage(&mut self, coverage: &[f32]) -> Result<()> {
+        if coverage.len() != self.coverage_pending.len() {
+            return Err(anyhow!(
+                "update_cloud_coverage: expected {} shell vertices, got {}",
+                self.coverage_pending.len(),
+                coverage.len()
+            ));
         }
-        self.staging[frame].write(&self.pending)?;
-        let size = self.staging[frame].size;
-        unsafe {
-            gpu.device.cmd_copy_buffer(
-                cb,
-                self.staging[frame].handle,
-                self.cell_buffers[frame].handle,
-                &[vk::BufferCopy::default().size(size)],
-            );
-            let barrier = [vk::BufferMemoryBarrier::default()
-                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                .dst_access_mask(vk::AccessFlags::SHADER_READ)
-                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                .buffer(self.cell_buffers[frame].handle)
-                .size(vk::WHOLE_SIZE)];
-            gpu.device.cmd_pipeline_barrier(
-                cb,
-                vk::PipelineStageFlags::TRANSFER,
-                vk::PipelineStageFlags::VERTEX_SHADER,
-                vk::DependencyFlags::empty(),
-                &[],
-                &barrier,
-                &[],
-            );
-        }
-        self.dirty[frame] = false;
+        self.coverage_pending.copy_from_slice(coverage);
+        self.coverage_dirty = [true; FRAMES_IN_FLIGHT];
         Ok(())
     }
 
-    /// Record the starfield background (fullscreen triangle, no depth write).
+    /// Record the pending cell-data and cloud-coverage copies for `frame`.
+    pub fn record_uploads(&mut self, gpu: &Gpu, cb: vk::CommandBuffer, frame: usize) -> Result<()> {
+        let mut barriers: Vec<vk::BufferMemoryBarrier> = Vec::with_capacity(2);
+        if self.dirty[frame] && !self.cell_buffers.is_empty() {
+            self.staging[frame].write(&self.pending)?;
+            let size = self.staging[frame].size;
+            unsafe {
+                gpu.device.cmd_copy_buffer(
+                    cb,
+                    self.staging[frame].handle,
+                    self.cell_buffers[frame].handle,
+                    &[vk::BufferCopy::default().size(size)],
+                );
+            }
+            barriers.push(buffer_barrier(self.cell_buffers[frame].handle));
+            self.dirty[frame] = false;
+        }
+        if self.coverage_dirty[frame] && !self.coverage_buffers.is_empty() {
+            self.coverage_staging[frame].write(&self.coverage_pending)?;
+            let size = self.coverage_staging[frame].size;
+            unsafe {
+                gpu.device.cmd_copy_buffer(
+                    cb,
+                    self.coverage_staging[frame].handle,
+                    self.coverage_buffers[frame].handle,
+                    &[vk::BufferCopy::default().size(size)],
+                );
+            }
+            barriers.push(buffer_barrier(self.coverage_buffers[frame].handle));
+            self.coverage_dirty[frame] = false;
+        }
+        if !barriers.is_empty() {
+            unsafe {
+                gpu.device.cmd_pipeline_barrier(
+                    cb,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::VERTEX_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &barriers,
+                    &[],
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Record the starfield background (fullscreen triangle, opaque, no depth
+    /// write, drawn before everything else).
     pub fn record_starfield(&self, gpu: &Gpu, cb: vk::CommandBuffer, params: &GlobeParams) {
+        self.record_sky(gpu, cb, params, false);
+    }
+
+    /// Record the atmospheric halo: the same fullscreen triangle, alpha
+    /// blended over the finished globe so the haze fogs the limb (and anything
+    /// vertical exaggeration pushes out past the silhouette) instead of being
+    /// painted over by it.
+    pub fn record_halo(&self, gpu: &Gpu, cb: vk::CommandBuffer, params: &GlobeParams) {
+        // A globe-view effect: a Mercator map has no limb to scatter around.
+        if params.mode != ViewMode::Globe || !params.beauty || params.atmosphere <= 0.0 {
+            return;
+        }
+        self.record_sky(gpu, cb, params, true);
+    }
+
+    fn record_sky(&self, gpu: &Gpu, cb: vk::CommandBuffer, params: &GlobeParams, halo: bool) {
         let push = StarPush {
             inv_view_proj: params.view_proj.inverse().to_cols_array(),
-            params: [params.star_seed, params.star_brightness, 0.0, 0.0],
+            params: [
+                params.star_seed,
+                params.star_brightness,
+                params.radius_km,
+                halo as u32 as f32,
+            ],
+            cam: [
+                params.camera_pos_km.x,
+                params.camera_pos_km.y,
+                params.camera_pos_km.z,
+                params.atmosphere.clamp(0.0, 1.0),
+            ],
+            sun: [params.sun_dir.x, params.sun_dir.y, params.sun_dir.z, 0.0],
+        };
+        let pipeline = if halo {
+            self.halo_pipeline
+        } else {
+            self.star_pipeline
         };
         unsafe {
             gpu.device
-                .cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.star_pipeline);
+                .cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, pipeline);
             gpu.device.cmd_push_constants(
                 cb,
                 self.star_layout,
@@ -488,12 +826,18 @@ impl GlobeRenderer {
                 ELEV_NORM_M,
                 params.center_lon_rad,
             ],
+            sun: [
+                params.sun_dir.x,
+                params.sun_dir.y,
+                params.sun_dir.z,
+                params.atmosphere.clamp(0.0, 1.0),
+            ],
             flags: [
                 match params.mode {
                     ViewMode::Globe => 0,
                     ViewMode::Mercator => 1,
                 },
-                0,
+                params.beauty as u32,
                 0,
                 0,
             ],
@@ -516,7 +860,7 @@ impl GlobeRenderer {
             gpu.device.cmd_push_constants(
                 cb,
                 self.pipeline_layout,
-                vk::ShaderStageFlags::VERTEX,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                 0,
                 bytemuck::bytes_of(&push),
             );
@@ -563,6 +907,57 @@ impl GlobeRenderer {
         };
     }
 
+    /// Record the cloud shell over the globe: alpha blended, depth tested
+    /// against the surface but never writing depth, back faces culled so the
+    /// far side of the shell does not double up around the limb.
+    ///
+    /// Globe view only — a cloud deck drawn on a Mercator map would be a lie
+    /// about where the weather is, and the shell has no projection anyway.
+    pub fn record_clouds(&self, gpu: &Gpu, cb: vk::CommandBuffer, frame: usize, p: &GlobeParams) {
+        if p.mode != ViewMode::Globe || p.cloud_opacity <= 0.0 || self.shell_index_count == 0 {
+            return;
+        }
+        let (Some(vertices), Some(indices)) = (&self.shell_vertices, &self.shell_indices) else {
+            return;
+        };
+        let push = CloudPush {
+            view_proj: p.view_proj.to_cols_array(),
+            cam_radius: [
+                p.camera_pos_km.x,
+                p.camera_pos_km.y,
+                p.camera_pos_km.z,
+                p.radius_km,
+            ],
+            sun_phase: [p.sun_dir.x, p.sun_dir.y, p.sun_dir.z, p.cloud_phase_rad],
+            misc: [p.cloud_opacity.clamp(0.0, 1.0), p.cloud_seed, 0.0, 0.0],
+        };
+        unsafe {
+            gpu.device
+                .cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.cloud_pipeline);
+            gpu.device.cmd_bind_descriptor_sets(
+                cb,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.cloud_layout,
+                0,
+                &[self.descriptor_sets[frame]],
+                &[],
+            );
+            gpu.device
+                .cmd_bind_vertex_buffers(cb, 0, &[vertices.handle], &[0]);
+            gpu.device
+                .cmd_bind_index_buffer(cb, indices.handle, 0, vk::IndexType::UINT32);
+            gpu.device.cmd_push_constants(
+                cb,
+                self.cloud_layout,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                0,
+                bytemuck::bytes_of(&push),
+            );
+            gpu.device
+                .cmd_draw_indexed(cb, self.shell_index_count, 1, 0, 0, 0);
+        }
+    }
+
     fn free_mesh(&mut self, gpu: &Gpu) {
         let mut allocator = gpu.alloc();
         for b in self
@@ -590,12 +985,36 @@ impl GlobeRenderer {
     /// Destroy every GPU object owned here. Device must be idle.
     pub fn destroy(&mut self, gpu: &Gpu) {
         self.free_mesh(gpu);
+        {
+            let mut allocator = gpu.alloc();
+            for b in self
+                .shell_vertices
+                .iter_mut()
+                .chain(self.shell_indices.iter_mut())
+            {
+                b.destroy(&gpu.device, &mut allocator);
+            }
+            for b in self
+                .coverage_buffers
+                .iter_mut()
+                .chain(self.coverage_staging.iter_mut())
+            {
+                b.destroy(&gpu.device, &mut allocator);
+            }
+        }
+        self.shell_vertices = None;
+        self.shell_indices = None;
+        self.coverage_buffers.clear();
+        self.coverage_staging.clear();
         unsafe {
             gpu.device.destroy_pipeline(self.pipeline, None);
             gpu.device.destroy_pipeline(self.star_pipeline, None);
+            gpu.device.destroy_pipeline(self.halo_pipeline, None);
+            gpu.device.destroy_pipeline(self.cloud_pipeline, None);
             gpu.device
                 .destroy_pipeline_layout(self.pipeline_layout, None);
             gpu.device.destroy_pipeline_layout(self.star_layout, None);
+            gpu.device.destroy_pipeline_layout(self.cloud_layout, None);
             gpu.device
                 .destroy_descriptor_pool(self.descriptor_pool, None);
             gpu.device
@@ -645,7 +1064,18 @@ fn create_globe_pipeline(
     // Back-face culling is off on purpose: the Mercator branch reprojects the
     // same triangles and can flip their winding, and reverse-Z makes the extra
     // overdraw cheap.
-    let pipeline = build_pipeline(gpu, render_pass, layout, &stages, &vertex_input, true, true);
+    let pipeline = build_pipeline(
+        gpu,
+        render_pass,
+        layout,
+        &stages,
+        &vertex_input,
+        PipelineOpts {
+            depth_test: true,
+            depth_write: true,
+            ..PipelineOpts::default()
+        },
+    );
     unsafe {
         device.destroy_shader_module(vs, None);
         device.destroy_shader_module(fs, None);
@@ -653,10 +1083,149 @@ fn create_globe_pipeline(
     pipeline
 }
 
+fn create_cloud_pipeline(
+    gpu: &Gpu,
+    render_pass: vk::RenderPass,
+    layout: vk::PipelineLayout,
+) -> Result<vk::Pipeline> {
+    let device = &gpu.device;
+    let vs = load_shader(device, CLOUD_VERT)?;
+    let fs = load_shader(device, CLOUD_FRAG)?;
+    let name = c"main";
+    let stages = [
+        vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::VERTEX)
+            .module(vs)
+            .name(name),
+        vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::FRAGMENT)
+            .module(fs)
+            .name(name),
+    ];
+    let bindings = [vk::VertexInputBindingDescription::default()
+        .binding(0)
+        .stride(std::mem::size_of::<[f32; 3]>() as u32)
+        .input_rate(vk::VertexInputRate::VERTEX)];
+    let attributes = [vk::VertexInputAttributeDescription::default()
+        .location(0)
+        .binding(0)
+        .format(vk::Format::R32G32B32_SFLOAT)
+        .offset(0)];
+    let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
+        .vertex_binding_descriptions(&bindings)
+        .vertex_attribute_descriptions(&attributes);
+    let pipeline = build_pipeline(
+        gpu,
+        render_pass,
+        layout,
+        &stages,
+        &vertex_input,
+        PipelineOpts {
+            // Tested against the surface (so the far side of the shell is
+            // hidden by the planet) but never written: the shell is a
+            // translucent overlay.
+            depth_test: true,
+            depth_write: false,
+            blend: true,
+            // Only the near face of the shell contributes; without this the
+            // rim beyond the silhouette would be drawn twice.
+            cull_back: true,
+        },
+    );
+    unsafe {
+        device.destroy_shader_module(vs, None);
+        device.destroy_shader_module(fs, None);
+    }
+    pipeline
+}
+
+/// A buffer barrier from a transfer write to a vertex-stage read.
+fn buffer_barrier(buffer: vk::Buffer) -> vk::BufferMemoryBarrier<'static> {
+    vk::BufferMemoryBarrier::default()
+        .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+        .dst_access_mask(vk::AccessFlags::SHADER_READ)
+        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        .buffer(buffer)
+        .size(vk::WHOLE_SIZE)
+}
+
+/// Unit-sphere icosahedron subdivided `level` times: outward-facing (CCW)
+/// triangles, shared vertices. Used for the cloud shell.
+fn icosphere(level: u32) -> (Vec<Vec3>, Vec<u32>) {
+    let t = (1.0 + 5.0f32.sqrt()) * 0.5;
+    let mut verts: Vec<Vec3> = [
+        [-1.0, t, 0.0],
+        [1.0, t, 0.0],
+        [-1.0, -t, 0.0],
+        [1.0, -t, 0.0],
+        [0.0, -1.0, t],
+        [0.0, 1.0, t],
+        [0.0, -1.0, -t],
+        [0.0, 1.0, -t],
+        [t, 0.0, -1.0],
+        [t, 0.0, 1.0],
+        [-t, 0.0, -1.0],
+        [-t, 0.0, 1.0],
+    ]
+    .iter()
+    .map(|v| Vec3::from_array(*v).normalize())
+    .collect();
+    let mut faces: Vec<[u32; 3]> = vec![
+        [0, 11, 5],
+        [0, 5, 1],
+        [0, 1, 7],
+        [0, 7, 10],
+        [0, 10, 11],
+        [1, 5, 9],
+        [5, 11, 4],
+        [11, 10, 2],
+        [10, 7, 6],
+        [7, 1, 8],
+        [3, 9, 4],
+        [3, 4, 2],
+        [3, 2, 6],
+        [3, 6, 8],
+        [3, 8, 9],
+        [4, 9, 5],
+        [2, 4, 11],
+        [6, 2, 10],
+        [8, 6, 7],
+        [9, 8, 1],
+    ];
+    for _ in 0..level {
+        let mut cache: HashMap<(u32, u32), u32> = HashMap::default();
+        let mut next = Vec::with_capacity(faces.len() * 4);
+        for f in &faces {
+            let mut mid = |a: u32, b: u32, verts: &mut Vec<Vec3>| -> u32 {
+                let key = if a < b { (a, b) } else { (b, a) };
+                *cache.entry(key).or_insert_with(|| {
+                    let v = (verts[a as usize] + verts[b as usize]).normalize();
+                    verts.push(v);
+                    verts.len() as u32 - 1
+                })
+            };
+            let a = mid(f[0], f[1], &mut verts);
+            let b = mid(f[1], f[2], &mut verts);
+            let c = mid(f[2], f[0], &mut verts);
+            next.push([f[0], a, c]);
+            next.push([f[1], b, a]);
+            next.push([f[2], c, b]);
+            next.push([a, b, c]);
+        }
+        faces = next;
+    }
+    let indices = faces.into_iter().flatten().collect();
+    (verts, indices)
+}
+
+/// The sky pass. `blend` selects the halo variant: same shaders, alpha blended
+/// over the finished frame instead of opaque under it.
 fn create_star_pipeline(
     gpu: &Gpu,
     render_pass: vk::RenderPass,
     layout: vk::PipelineLayout,
+    blend: bool,
 ) -> Result<vk::Pipeline> {
     let device = &gpu.device;
     let vs = load_shader(device, STAR_VERT)?;
@@ -679,8 +1248,10 @@ fn create_star_pipeline(
         layout,
         &stages,
         &vertex_input,
-        false,
-        false,
+        PipelineOpts {
+            blend,
+            ..PipelineOpts::default()
+        },
     );
     unsafe {
         device.destroy_shader_module(vs, None);
@@ -689,14 +1260,23 @@ fn create_star_pipeline(
     pipeline
 }
 
+/// The few fixed-function knobs the three passes disagree about.
+#[derive(Debug, Clone, Copy, Default)]
+struct PipelineOpts {
+    depth_test: bool,
+    depth_write: bool,
+    /// Straight source-alpha blending (the cloud shell).
+    blend: bool,
+    cull_back: bool,
+}
+
 fn build_pipeline(
     gpu: &Gpu,
     render_pass: vk::RenderPass,
     layout: vk::PipelineLayout,
     stages: &[vk::PipelineShaderStageCreateInfo],
     vertex_input: &vk::PipelineVertexInputStateCreateInfo,
-    depth_test: bool,
-    depth_write: bool,
+    opts: PipelineOpts,
 ) -> Result<vk::Pipeline> {
     let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
         .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
@@ -705,7 +1285,11 @@ fn build_pipeline(
         .scissor_count(1);
     let raster = vk::PipelineRasterizationStateCreateInfo::default()
         .polygon_mode(vk::PolygonMode::FILL)
-        .cull_mode(vk::CullModeFlags::NONE)
+        .cull_mode(if opts.cull_back {
+            vk::CullModeFlags::BACK
+        } else {
+            vk::CullModeFlags::NONE
+        })
         .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
         .line_width(1.0);
     let multisample = vk::PipelineMultisampleStateCreateInfo::default()
@@ -713,14 +1297,20 @@ fn build_pipeline(
     // Reverse-Z: the depth buffer is cleared to 0.0 and nearer fragments have
     // the larger depth value, hence GREATER.
     let depth = vk::PipelineDepthStencilStateCreateInfo::default()
-        .depth_test_enable(depth_test)
-        .depth_write_enable(depth_write)
+        .depth_test_enable(opts.depth_test)
+        .depth_write_enable(opts.depth_write)
         .depth_compare_op(vk::CompareOp::GREATER)
         .min_depth_bounds(0.0)
         .max_depth_bounds(1.0);
     let blend_attachments = [vk::PipelineColorBlendAttachmentState::default()
         .color_write_mask(vk::ColorComponentFlags::RGBA)
-        .blend_enable(false)];
+        .blend_enable(opts.blend)
+        .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
+        .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+        .color_blend_op(vk::BlendOp::ADD)
+        .src_alpha_blend_factor(vk::BlendFactor::ONE)
+        .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+        .alpha_blend_op(vk::BlendOp::ADD)];
     let blend = vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend_attachments);
     let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
     let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
@@ -744,4 +1334,93 @@ fn build_pipeline(
     }
     .map_err(|(_, e)| anyhow!("vkCreateGraphicsPipelines: {e}"))?;
     Ok(pipelines[0])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The exact bit patterns GLSL's `unpackHalf2x16` will read back.
+    #[test]
+    fn half_packing_matches_ieee_binary16() {
+        for (v, bits) in [
+            (0.0f32, 0x0000u16),
+            (-0.0, 0x8000),
+            (1.0, 0x3c00),
+            (-2.0, 0xc000),
+            (0.5, 0x3800),
+            (0.1, 0x2e66),
+            (65504.0, 0x7bff),
+            (1.0e9, 0x7bff), // saturates instead of going infinite
+            (-1.0e9, 0xfbff),
+            (1.0e-9, 0x0000), // underflows to zero
+            (6.0e-8, 0x0001), // smallest subnormal
+        ] {
+            assert_eq!(f16_bits(v), bits, "{v} packed as {:#06x}", f16_bits(v));
+        }
+        assert!(f16_bits(f32::NAN) & 0x7fff > 0x7c00, "NaN must stay NaN");
+        // Terrain gradients are small; they must survive the round trip.
+        for g in [-0.4f32, -0.05, -0.001, 0.0, 0.001, 0.05, 0.4] {
+            let packed = pack_half2(g, -g);
+            let lo = half_to_f32((packed & 0xffff) as u16);
+            let hi = half_to_f32((packed >> 16) as u16);
+            assert!((lo - g).abs() < 1e-3 * g.abs().max(1e-3), "{g} -> {lo}");
+            assert!((hi + g).abs() < 1e-3 * g.abs().max(1e-3), "{g} -> {hi}");
+        }
+    }
+
+    fn half_to_f32(bits: u16) -> f32 {
+        let sign = if bits & 0x8000 != 0 { -1.0 } else { 1.0 };
+        let exp = ((bits >> 10) & 0x1f) as i32;
+        let frac = (bits & 0x3ff) as f32;
+        match exp {
+            0 => sign * frac * 2f32.powi(-24),
+            _ => sign * (1.0 + frac / 1024.0) * 2f32.powi(exp - 15),
+        }
+    }
+
+    #[test]
+    fn material_bytes_survive_the_round_trip() {
+        let packed = pack_unorm4(SurfaceKind::Lake as u8 as f32 / 255.0, 0.5, 1.0, 0.0);
+        let bytes = packed.to_le_bytes();
+        assert_eq!(bytes[0], 2, "kind is byte 0");
+        assert_eq!(bytes[1], 128);
+        assert_eq!(bytes[2], 255);
+        assert_eq!(bytes[3], 0);
+        // Out-of-range input clamps rather than wrapping.
+        assert_eq!(
+            pack_unorm4(-1.0, 2.0, 0.0, 0.0).to_le_bytes(),
+            [0, 255, 0, 0]
+        );
+    }
+
+    #[test]
+    fn cloud_shell_is_a_closed_unit_sphere() {
+        let (verts, indices) = icosphere(2);
+        assert_eq!(verts.len(), 10 * 4usize.pow(2) + 2);
+        assert_eq!(indices.len(), 20 * 4usize.pow(2) * 3);
+        for v in &verts {
+            assert!((v.length() - 1.0).abs() < 1e-5);
+        }
+        // Every triangle faces outwards (CCW seen from outside), which is what
+        // the cloud pipeline's back-face culling relies on.
+        for f in indices.chunks(3) {
+            let (a, b, c) = (
+                verts[f[0] as usize],
+                verts[f[1] as usize],
+                verts[f[2] as usize],
+            );
+            let n = (b - a).cross(c - a);
+            assert!(n.dot(a + b + c) > 0.0, "inward-facing triangle {f:?}");
+        }
+        assert_eq!(icosphere(CLOUD_SHELL_LEVEL).0.len(), 10242);
+    }
+
+    #[test]
+    fn push_constants_fit_the_guaranteed_minimum() {
+        assert_eq!(std::mem::size_of::<GlobePush>(), 128);
+        assert!(std::mem::size_of::<StarPush>() <= 128);
+        assert!(std::mem::size_of::<CloudPush>() <= 128);
+        assert_eq!(std::mem::size_of::<CellGpu>(), 16);
+    }
 }

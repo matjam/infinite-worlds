@@ -3,7 +3,8 @@
 //!
 //! Everything here is CPU-side and GPU-free so it can be unit tested. The
 //! renderer only ever sees the finished `[u8; 4]` array (see
-//! `iw_render_vulkan::Renderer::update_cells`).
+//! `iw_render_vulkan::Renderer::update_cells`) plus, for the beauty layer, the
+//! shading inputs built in [`crate::beauty`].
 //!
 //! Palette conventions:
 //! * sequential physical fields (temperature, precipitation, ice, crust age)
@@ -16,12 +17,12 @@
 
 use iw_core::{Biome, CrustType, RockType, ViewCells};
 
+use crate::beauty::{self, BeautyCell};
+
 /// Ice thickness (m) at which a cell is drawn as fully glaciated.
-pub const ICE_FULL_M: f32 = 500.0;
+pub const ICE_FULL_M: f32 = beauty::ICE_FULL_M;
 /// Ice thickness (m) below which ice is ignored by the beauty layer.
-pub const ICE_MIN_M: f32 = 5.0;
-/// Ocean depth (m below sea level) at which the abyssal colour is reached.
-pub const OCEAN_DEEP_M: f32 = 6_000.0;
+pub const ICE_MIN_M: f32 = beauty::ICE_MIN_M;
 /// Oceanic crust age (Myr) at which the "old crust" colour is reached.
 pub const CRUST_AGE_MAX_MYR: f32 = 200.0;
 /// Crust thickness (m) at which the "thick crust" lightness is reached.
@@ -40,8 +41,9 @@ pub const NO_PLATE: u16 = u16::MAX;
 /// is bound to `-`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Layer {
-    /// Placeholder for the WP11 beauty view: biome albedo on land, depth-shaded
-    /// blues at sea, white ice.
+    /// The beauty view (DESIGN §9): lit Blue-Marble shading — biome albedo,
+    /// relief from the elevation gradient, depth-graded ocean with sun glint,
+    /// white ice, atmospheric limb, optional clouds.
     Beauty,
     /// Hypsometric tint (the PNG exporter's palette).
     Elevation,
@@ -84,7 +86,7 @@ impl Layer {
     /// Menu label.
     pub fn name(self) -> &'static str {
         match self {
-            Layer::Beauty => "Beauty (placeholder)",
+            Layer::Beauty => "Beauty",
             Layer::Elevation => "Elevation",
             Layer::Biomes => "Biomes",
             Layer::Plates => "Plates + velocity",
@@ -101,7 +103,9 @@ impl Layer {
     /// One-line description of what the colours mean.
     pub fn legend(self) -> &'static str {
         match self {
-            Layer::Beauty => "biome albedo on land, depth-shaded ocean, white ice",
+            Layer::Beauty => {
+                "lit satellite view: biome albedo, relief, ocean depth, ice, atmosphere"
+            }
             Layer::Elevation => "hypsometric: navy abyss -> green lowland -> white peak",
             Layer::Biomes => "WWF biome palette",
             Layer::Plates => "one hue per plate; grey = unassigned",
@@ -233,30 +237,17 @@ pub fn hsv(hue_turns: f32, s: f32, v: f32) -> [u8; 3] {
     ]
 }
 
-/// Beauty placeholder: biome albedo on land, depth-shaded blue at sea, white
-/// where there is ice. WP11 replaces this with the lit Blue-Marble shader.
+/// Beauty albedo (the palette half of the beauty view; see [`crate::beauty`]).
+/// Only the fields a thin history snapshot carries — the live path builds a
+/// fuller [`BeautyCell`] in [`cell_color`].
 pub fn beauty_color(elev_m: f32, sea_level_m: f32, ice_m: f32, biome: Biome) -> [u8; 4] {
-    if ice_m >= ICE_MIN_M {
-        let t = (ice_m / ICE_FULL_M).clamp(0.0, 1.0);
-        return rgba(lerp([0xd0, 0xe0, 0xe8], [0xf4, 0xfa, 0xff], t));
-    }
-    let rel = elev_m - sea_level_m;
-    if rel < 0.0 {
-        // Deep water dark navy, shelf turquoise.
-        let t = (-rel / OCEAN_DEEP_M).clamp(0.0, 1.0);
-        return rgba(lerp([0x2e, 0x86, 0xa8], [0x08, 0x1d, 0x4a], t));
-    }
-    match biome {
-        Biome::Ocean | Biome::Lake => rgba([0x1d, 0x4e, 0x89]),
-        // Before the biome process has classified anything, fall back to a
-        // land tint keyed off height so the early globe is still readable.
-        Biome::Unclassified => rgba(lerp(
-            [0x6b, 0x7a, 0x52],
-            [0x9c, 0x8f, 0x78],
-            (rel / 4_000.0).clamp(0.0, 1.0),
-        )),
-        b => rgba(iw_biomes::biome_color(b)),
-    }
+    beauty::beauty_color(&BeautyCell {
+        elev_m,
+        sea_level_m,
+        ice_m,
+        biome,
+        ..BeautyCell::default()
+    })
 }
 
 /// Hypsometric elevation tint, shared with the PNG exporter.
@@ -395,6 +386,18 @@ pub fn water_flux_color(
     rgba(lerp([base[0], base[1], base[2]], river, mix))
 }
 
+/// Everything the beauty palette reads about one cell of a live snapshot.
+pub fn beauty_cell(cells: &ViewCells, sea_level_m: f32, cell: usize) -> BeautyCell {
+    BeautyCell {
+        elev_m: cells.elevation_m[cell],
+        sea_level_m,
+        ice_m: cells.ice_thickness_m[cell],
+        lake_depth_m: cells.lake_depth_m[cell],
+        temperature_c: cells.temperature_c[cell],
+        biome: cells.biome[cell],
+    }
+}
+
 /// Colour one cell for `layer`.
 pub fn cell_color(
     layer: Layer,
@@ -405,12 +408,7 @@ pub fn cell_color(
 ) -> [u8; 4] {
     let elev = cells.elevation_m[cell];
     match layer {
-        Layer::Beauty => beauty_color(
-            elev,
-            sea_level_m,
-            cells.ice_thickness_m[cell],
-            cells.biome[cell],
-        ),
+        Layer::Beauty => beauty::beauty_color(&beauty_cell(cells, sea_level_m, cell)),
         Layer::Elevation => elevation_color(elev, sea_level_m),
         Layer::Biomes => biome_color(cells.biome[cell]),
         Layer::Plates => plate_color(cells.plate_id[cell]),

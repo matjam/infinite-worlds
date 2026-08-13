@@ -4,9 +4,10 @@
 //! flat per-cell arrays for data, and knows nothing about the simulation.
 //!
 //! Layout:
-//! * [`camera`] and [`mercator`] and [`cull`] — pure math, unit tested, no GPU.
+//! * [`camera`], [`mercator`], [`cull`] and [`beauty`] — pure math, unit
+//!   tested, no GPU.
 //! * [`gpu`], [`swapchain`], [`buffer`] — Vulkan bring-up.
-//! * [`globe`] — geometry, per-cell storage buffers, globe/starfield pipelines.
+//! * [`globe`] — geometry, per-cell storage buffers, globe/sky/cloud pipelines.
 //! * [`renderer`] — the frame loop.
 //! * [`ui`] — the egui overlay.
 //!
@@ -16,6 +17,7 @@
 //! * **World units are kilometres**; elevations are metres.
 //! * `+z` is the north pole, longitude 0 at `+x` increasing toward `+y`.
 
+pub mod beauty;
 pub mod buffer;
 pub mod camera;
 pub mod cull;
@@ -26,8 +28,9 @@ pub mod renderer;
 pub mod swapchain;
 pub mod ui;
 
+pub use beauty::{SunMode, SunSettings};
 pub use camera::{Camera, MoveInput, ViewMode};
-pub use globe::{DrawStats, GlobeParams, FRAMES_IN_FLIGHT};
+pub use globe::{CellShade, DrawStats, GlobeParams, SurfaceKind, FRAMES_IN_FLIGHT};
 pub use renderer::{EguiFrame, Renderer};
 pub use ui::{Ui, UiOutput, UiState};
 

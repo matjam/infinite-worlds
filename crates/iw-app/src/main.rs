@@ -8,6 +8,7 @@
 //! request/response channel, and history snapshots are written on a third
 //! thread.
 
+mod beauty;
 mod history_log;
 mod inspector;
 mod layers;
@@ -37,7 +38,7 @@ use iw_render_vulkan::winit::event::{ElementState, MouseButton, MouseScrollDelta
 use iw_render_vulkan::winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use iw_render_vulkan::winit::keyboard::{Key, KeyCode, NamedKey, PhysicalKey};
 use iw_render_vulkan::winit::window::{Window, WindowId};
-use iw_render_vulkan::{Camera, EguiFrame, MoveInput, Renderer, Ui};
+use iw_render_vulkan::{Camera, EguiFrame, MoveInput, Renderer, SunMode, SunSettings, Ui};
 use iw_sim::{SimHandle, SimState};
 use iw_store_postcard::{HistorySnapshot, HistoryStore};
 
@@ -53,6 +54,10 @@ const LOG_SENSITIVITY: f32 = 0.0045;
 const CLICK_SLOP_PX: f32 = 5.0;
 /// How long the inspector waits for a column before giving up on the request.
 const COLUMN_TIMEOUT: Duration = Duration::from_secs(5);
+/// Cloud coverage is weather, not data: recomputing it on every snapshot would
+/// burn CPU for a picture nobody can tell apart. Once every this often is
+/// plenty.
+const CLOUD_REFRESH: Duration = Duration::from_secs(2);
 
 #[derive(Parser, Debug, Clone)]
 #[command(name = "iw-app", about = "Infinite Worlds viewer")]
@@ -88,6 +93,22 @@ struct Args {
     /// Start paused instead of generating immediately.
     #[arg(long)]
     paused: bool,
+    /// Re-run only the last phase from the checkpoint on disk instead of
+    /// generating from scratch — a finished-looking planet in seconds, for
+    /// looking at the beauty view. Falls back to a full run if the checkpoint
+    /// is missing.
+    #[arg(long)]
+    resume: bool,
+    /// Initial camera focus latitude/longitude in degrees (reproducible
+    /// framing for screenshots).
+    #[arg(long, allow_hyphen_values = true)]
+    lat_deg: Option<f32>,
+    /// See `--lat-deg`.
+    #[arg(long, allow_hyphen_values = true)]
+    lon_deg: Option<f32>,
+    /// Start with the procedural cloud layer on (default off, per DESIGN §9).
+    #[arg(long)]
+    clouds: bool,
 }
 
 /// Build the five real processes in the order the simulation requires. Mirrors
@@ -129,6 +150,8 @@ struct FrameActions {
     scrub: Option<ScrubAction>,
     recolor: bool,
     toggle_mode: bool,
+    /// The cloud layer was switched on, so its field needs building.
+    clouds_on: bool,
 }
 
 /// The live simulation and everything hanging off it.
@@ -167,6 +190,12 @@ struct App {
     layer: Layer,
     scales: LayerScales,
     exaggeration: f32,
+    /// Beauty view: where the sun is.
+    sun: SunSettings,
+    /// Beauty view: procedural cloud deck (DESIGN §9 wants it off by default).
+    clouds: bool,
+    /// When the cloud coverage field was last rebuilt.
+    clouds_refreshed: Option<Instant>,
     panel: PanelState,
     scrubber: Scrubber,
     inspector: inspector::Inspector,
@@ -212,6 +241,12 @@ impl App {
             iw_render_vulkan::camera::MAX_ALTITUDE_KM,
         );
         camera.free_look(0.0, args.pitch_deg.to_radians());
+        if args.lat_deg.is_some() || args.lon_deg.is_some() {
+            let lat = args.lat_deg.unwrap_or(0.0).clamp(-89.0, 89.0).to_radians();
+            let lon = args.lon_deg.unwrap_or(0.0).to_radians();
+            camera.focus = iw_render_vulkan::mercator::dir_from_latlon(lat, lon);
+            camera.mercator_center = Vec2::new(lon, iw_render_vulkan::mercator::mercator_y(lat));
+        }
         if args.mercator {
             camera.mode = ViewMode::Mercator;
         }
@@ -237,6 +272,9 @@ impl App {
             layer: Layer::Beauty,
             scales: LayerScales::default(),
             exaggeration: 30.0,
+            sun: SunSettings::default(),
+            clouds: args.clouds,
+            clouds_refreshed: None,
             scrubber: Scrubber::default(),
             inspector: inspector::Inspector::default(),
             pending_column: None,
@@ -368,6 +406,15 @@ impl App {
             Arc::new(NullProgress),
             mesh_builder,
         );
+        if self.args.resume {
+            // Loads the checkpoint written before the last phase and re-runs
+            // only that phase: a fully evolved planet in seconds. The worker
+            // logs and stays idle if the checkpoint is not there.
+            let last = Phase::ALL[Phase::ALL.len() - 1];
+            handle.rerun_from_phase(last, config.clone());
+            self.log
+                .push(format!("resuming from the {} checkpoint", phase_name(last)));
+        }
         if !self.args.paused {
             handle.start();
         }
@@ -495,19 +542,41 @@ impl App {
         self.view = Some(view);
         if self.scrubber.live {
             self.refresh_cells()?;
+            self.refresh_clouds(false)?;
         }
         Ok(())
     }
 
     /// Push per-cell elevation and colour for the current layer and source
     /// (live snapshot, or the history snapshot being scrubbed).
+    ///
+    /// The beauty layer additionally ships the shading inputs (relief
+    /// gradients, surface kind, depth and ice) and a flattened sea surface;
+    /// every other layer keeps the raw elevation and flat shading so its
+    /// palette is readable off the screen.
     fn refresh_cells(&mut self) -> Result<()> {
+        let mesh = self.mesh.clone();
+        let beauty_on = self.layer == Layer::Beauty;
         let Some(renderer) = self.renderer.as_mut() else {
             return Ok(());
         };
         if let Some(snap) = self.historic.as_ref() {
             let (colors, substituted) = layers::snapshot_colors(self.layer, snap);
-            renderer.update_cells(&snap.elevation_m, &colors)?;
+            match (beauty_on, mesh.as_ref()) {
+                (true, Some(mesh)) => {
+                    // A thin snapshot has no lakes; everything else it has.
+                    let lakes = vec![0.0f32; snap.elevation_m.len()];
+                    let (display, shade) = beauty::shading(
+                        mesh,
+                        &snap.elevation_m,
+                        snap.sea_level_m,
+                        &snap.ice_thickness_m,
+                        &lakes,
+                    );
+                    renderer.update_cells_shaded(&display, &colors, Some(&shade))?;
+                }
+                _ => renderer.update_cells(&snap.elevation_m, &colors)?,
+            }
             self.scrubber.layer_substituted = substituted;
             self.cell_updates += 1;
             return Ok(());
@@ -515,12 +584,54 @@ impl App {
         if let Some(view) = self.view.as_ref() {
             let colors =
                 layers::cell_colors(self.layer, &view.cells, view.sea_level_m, self.scales);
-            renderer.update_cells(&view.cells.elevation_m, &colors)?;
+            match (beauty_on, mesh.as_ref()) {
+                (true, Some(mesh)) => {
+                    let (display, shade) = beauty::shading(
+                        mesh,
+                        &view.cells.elevation_m,
+                        view.sea_level_m,
+                        &view.cells.ice_thickness_m,
+                        &view.cells.lake_depth_m,
+                    );
+                    renderer.update_cells_shaded(&display, &colors, Some(&shade))?;
+                }
+                _ => renderer.update_cells(&view.cells.elevation_m, &colors)?,
+            }
             self.cell_updates += 1;
         } else if self.args.test_sphere && !self.static_elevation.is_empty() {
             let colors = terrain::generate_colors(&self.static_elevation);
             renderer.update_cells(&self.static_elevation, &colors)?;
         }
+        Ok(())
+    }
+
+    /// Rebuild the cloud coverage field from the current snapshot and hand it
+    /// to the shell. Throttled: see [`CLOUD_REFRESH`].
+    fn refresh_clouds(&mut self, force: bool) -> Result<()> {
+        if !self.clouds {
+            return Ok(());
+        }
+        if !force {
+            match self.clouds_refreshed {
+                Some(t) if t.elapsed() < CLOUD_REFRESH => return Ok(()),
+                _ => {}
+            }
+        }
+        let (Some(mesh), Some(view)) = (self.mesh.clone(), self.view.clone()) else {
+            return Ok(());
+        };
+        if view.cells.precip_mm_yr.len() != mesh.n_cells() {
+            return Ok(());
+        }
+        let seed = self.config.seed;
+        let Some(renderer) = self.renderer.as_mut() else {
+            return Ok(());
+        };
+        let field = beauty::cloud_coverage(&mesh, &view.cells.precip_mm_yr, seed);
+        let dirs = renderer.cloud_shell_dirs().to_vec();
+        let coverage = beauty::sample_at_dirs(&mesh, &field, &dirs);
+        renderer.update_cloud_coverage(&coverage)?;
+        self.clouds_refreshed = Some(Instant::now());
         Ok(())
     }
 
@@ -819,6 +930,36 @@ impl App {
                 }
                 ui.weak(self.layer.legend());
 
+                // Beauty view controls (WP11). Open by default: three widgets,
+                // and the sun is the one thing a screenshot usually wants moved.
+                egui::CollapsingHeader::new("Beauty")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        ui.add(
+                            egui::Slider::new(&mut self.sun.azimuth_deg, 0.0..=360.0)
+                                .text("Sun azimuth")
+                                .suffix("°"),
+                        );
+                        let mut fixed = self.sun.mode == SunMode::Fixed;
+                        if ui.checkbox(&mut fixed, "Fixed sun").changed() {
+                            self.sun.mode = if fixed {
+                                SunMode::Fixed
+                            } else {
+                                SunMode::CameraRelative
+                            };
+                        }
+                        ui.weak(match self.sun.mode {
+                            SunMode::Fixed => "sun stays put; orbit to walk the terminator",
+                            SunMode::CameraRelative => "sun follows the camera, 30° off axis",
+                        });
+                        if ui.checkbox(&mut self.clouds, "Clouds (C)").changed() && self.clouds {
+                            actions.clouds_on = true;
+                        }
+                        if self.layer != Layer::Beauty {
+                            ui.weak("(the Beauty layer shows these)");
+                        }
+                    });
+
                 ui.separator();
                 ui.horizontal(|ui| {
                     if ui.button("New planet (N)").clicked() {
@@ -940,6 +1081,7 @@ impl App {
                     ("G / M", "globe / Mercator toggle"),
                     ("Space", "pause / resume the simulation"),
                     ("Shift+S", "single step (plain S is 'move south')"),
+                    ("C", "clouds on / off (beauty view)"),
                     ("N", "New planet panel"),
                     ("F5", "roll a new seed and regenerate"),
                     ("1..9, 0", "select data layer"),
@@ -1098,6 +1240,9 @@ impl App {
         if actions.recolor {
             self.refresh_cells()?;
         }
+        if actions.clouds_on {
+            self.refresh_clouds(true)?;
+        }
         match actions.scrub.or_else(|| self.pending_scrub.take()) {
             Some(ScrubAction::Load(version)) => self.show_history(version)?,
             Some(ScrubAction::Live) => self.go_live()?,
@@ -1133,8 +1278,23 @@ impl App {
             mode: self.camera.mode,
             center_lon_rad: self.camera.mercator_center.x,
             cull: !self.args.no_cull,
-            star_seed: 1.0,
+            // Each planet gets its own (deterministic) sky.
+            star_seed: (self.config.seed % 4096) as f32,
             star_brightness: 1.0,
+            beauty: self.layer == Layer::Beauty,
+            sun_dir: iw_render_vulkan::beauty::sun_direction(self.sun, self.camera.eye()),
+            atmosphere: iw_render_vulkan::beauty::haze_fade(self.camera.altitude_km),
+            // Clouds ride on the beauty view only: over a data layer they would
+            // hide the very field the layer exists to show.
+            cloud_opacity: if self.clouds && self.layer == Layer::Beauty {
+                1.0
+            } else {
+                0.0
+            },
+            cloud_phase_rad: iw_render_vulkan::beauty::cloud_phase_rad(
+                (now - self.start).as_secs_f32(),
+            ),
+            cloud_seed: (self.config.seed % 977) as f32,
         };
 
         let renderer = self.renderer.as_mut().expect("renderer");
@@ -1252,6 +1412,14 @@ impl ApplicationHandler for App {
                         "m" | "M" | "g" | "G" => self.toggle_mode(),
                         "n" | "N" => self.panel.open = !self.panel.open,
                         "i" | "I" => self.pick_centre(),
+                        "c" | "C" => {
+                            self.clouds = !self.clouds;
+                            if self.clouds {
+                                if let Err(e) = self.refresh_clouds(true) {
+                                    self.error = Some(e);
+                                }
+                            }
+                        }
                         "l" | "L" => self.pending_scrub = Some(ScrubAction::Live),
                         "," | "<" => self.scrub_by(-1),
                         "." | ">" => self.scrub_by(1),

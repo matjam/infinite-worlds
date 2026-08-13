@@ -157,6 +157,36 @@ impl Renderer {
             .update_cells(elevation_m, color_rgba8)
     }
 
+    /// Replace per-cell elevation, colour and beauty shading inputs.
+    pub fn update_cells_shaded(
+        &mut self,
+        elevation_m: &[f32],
+        color_rgba8: &[[u8; 4]],
+        shade: Option<&[crate::globe::CellShade]>,
+    ) -> Result<()> {
+        self.globe
+            .as_mut()
+            .expect("globe alive")
+            .update_cells_shaded(elevation_m, color_rgba8, shade)
+    }
+
+    /// Unit directions of the cloud shell's vertices (see
+    /// [`crate::globe::GlobeRenderer::cloud_shell_dirs`]).
+    pub fn cloud_shell_dirs(&self) -> &[glam::Vec3] {
+        self.globe
+            .as_ref()
+            .map(|g| g.cloud_shell_dirs())
+            .unwrap_or(&[])
+    }
+
+    /// Replace the cloud shell's per-vertex coverage (0..1).
+    pub fn update_cloud_coverage(&mut self, coverage: &[f32]) -> Result<()> {
+        self.globe
+            .as_mut()
+            .expect("globe alive")
+            .update_cloud_coverage(coverage)
+    }
+
     /// Note that the window changed size; the swapchain is rebuilt next frame.
     pub fn request_resize(&mut self, size: (u32, u32)) {
         self.surface_size = size;
@@ -343,6 +373,12 @@ impl Renderer {
         if let Some(globe) = self.globe.as_mut() {
             globe.record_starfield(&self.gpu, cb, params);
             globe.record_globe(&self.gpu, cb, frame, params);
+            // After the globe: the shell is translucent and depth-tested
+            // against the surface it hangs over.
+            globe.record_clouds(&self.gpu, cb, frame, params);
+            // Last: the atmosphere fogs everything in front of it, clouds
+            // included.
+            globe.record_halo(&self.gpu, cb, params);
         }
 
         if let Some(egui) = self.egui.as_mut() {
