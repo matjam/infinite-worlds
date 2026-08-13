@@ -25,6 +25,7 @@
 
 pub mod biome;
 pub mod config;
+pub mod noise;
 pub mod planet;
 pub mod ports;
 pub mod process;
