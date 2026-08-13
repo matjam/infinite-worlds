@@ -134,13 +134,14 @@ fn step_once_advances_exactly_one_step() {
 }
 
 #[test]
-fn regenerate_resets_time_and_rebuilds_the_mesh_only_on_a_level_change() {
+fn regenerate_resets_time_and_rebuilds_the_tessellation() {
     let calls = Arc::new(AtomicUsize::new(0));
     let sim = spawn(config(4), calls.clone());
     sim.start();
     assert!(wait_for(2000, || sim.status().step_index >= 3));
 
-    // Same level: the existing mesh is kept.
+    // Every regenerate is a fresh tessellation (a new seed or budget means
+    // new generators), so the injected builder is called each time.
     sim.regenerate(config(5));
     assert!(
         wait_for(2000, || sim.status().step_index == 0),
@@ -153,17 +154,12 @@ fn regenerate_resets_time_and_rebuilds_the_mesh_only_on_a_level_change() {
         SimState::Idle,
         "Regenerate must leave it paused"
     );
-    assert_eq!(calls.load(Ordering::SeqCst), 0, "mesh rebuilt needlessly");
-    assert_eq!(
-        sim.latest_view().map(|v| v.cells.elevation_m.len()),
-        Some(4)
-    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "builder not called");
 
-    // Different level: the injected builder is called exactly once.
     let mut bigger = config(6);
     bigger.subdivision_level = MIN_LEVEL + 1;
     sim.regenerate(bigger);
-    assert!(wait_for(2000, || calls.load(Ordering::SeqCst) == 1));
+    assert!(wait_for(2000, || calls.load(Ordering::SeqCst) == 2));
     assert!(wait_for(2000, || sim
         .latest_view()
         .map(|v| v.cells.elevation_m.len())
@@ -208,9 +204,10 @@ fn rerun_from_phase_reloads_the_previous_checkpoint() {
     assert!(wait_for(4000, || sim.state() == SimState::Done));
     assert_eq!(sim.status().step_index, 16);
 
-    // A level change is refused and leaves the sim alone.
+    // A cell-budget change is refused (it would invalidate every per-cell
+    // array) and leaves the sim alone.
     let mut wrong = cfg;
-    wrong.subdivision_level = MIN_LEVEL + 2;
+    wrong.cell_budget += 12_345;
     sim.rerun_from_phase(Phase::Drift, wrong);
     std::thread::sleep(Duration::from_millis(50));
     assert_eq!(sim.status().step_index, 16);

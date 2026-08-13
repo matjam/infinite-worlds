@@ -24,13 +24,13 @@ use crate::{
 /// Slab pull per metre of subducting boundary (reference units).
 const SLAB_PULL: f64 = 1.0;
 /// Ridge push per metre of spreading boundary, relative to slab pull.
-const RIDGE_PUSH: f64 = 0.22;
+const RIDGE_PUSH: f64 = 0.40;
 /// Viscous braking per metre of collisional boundary, per (m/yr) of closure.
 const COLLISION_VISC: f64 = 100.0;
 /// Converts driving torque density into angular velocity, rad*m/Myr.
 /// Calibrated so a plate with a normal share of subducting boundary settles
 /// around 4-6 cm/yr at `tectonic_vigor == 1`.
-const TORQUE_GAIN: f64 = 2.0e5;
+const TORQUE_GAIN: f64 = 1.5e5;
 /// Smallest plate area, as a fraction of the planet, that the drag term will
 /// use. Without it a microplate's perimeter-to-area ratio drives it straight
 /// into the speed cap; real microplates are dragged along by their neighbours.
@@ -95,15 +95,15 @@ const CONTINENTAL_RELAX_TAU_MYR: f32 = 400.0;
 // --- rifting / welding ---
 
 /// Plate area fraction above which a mostly continental plate is unstable.
-const SUPERPLATE_AREA_FRAC: f64 = 0.25;
+const SUPERPLATE_AREA_FRAC: f64 = 0.18;
 /// Continental area fraction that makes a big plate a rift candidate.
 const SUPERPLATE_CONT_FRAC: f64 = 0.22;
 /// Rift nucleation probability per Myr for an unstable superplate.
-const RIFT_PROB_SUPER_PER_MYR: f64 = 0.025;
+const RIFT_PROB_SUPER_PER_MYR: f64 = 0.04;
 /// Background rift nucleation probability per Myr for any other plate.
 const RIFT_PROB_BASE_PER_MYR: f64 = 0.0002;
 /// Opening speed handed to the two halves of a fresh rift, m/yr.
-const RIFT_SEPARATION_M_YR: f32 = 0.05;
+const RIFT_SEPARATION_M_YR: f32 = 0.07;
 /// Smallest fragment a rift may produce, in cells.
 const MIN_RIFT_FRAGMENT: usize = 6;
 /// Collisional boundary length, in cell pitches, needed before plates may weld.
@@ -118,9 +118,12 @@ const WELD_SPEED_M_YR: f64 = 0.008;
 /// a single superplate.
 const QUIET_MERGE_PITCHES: f64 = 12.0;
 const QUIET_MERGE_SPEED_M_YR: f64 = 0.002;
-/// Mean boundary age (younger side) below which a plate pair is weld-immune:
-/// it is an opening rift, not a dead boundary.
-const RIFT_WELD_IMMUNITY_MYR: f64 = 30.0;
+/// Mean boundary age (younger oceanic side) below which a plate pair is
+/// weld-immune: it is an opening rift, not a dead boundary.
+const RIFT_WELD_IMMUNITY_MYR: f64 = 60.0;
+/// Mean opening rate above which a pair is weld-immune (active divergence,
+/// even before the gap has any ocean floor).
+const RIFT_OPEN_IMMUNITY_M_YR: f64 = 0.005;
 /// Area fraction beyond which any plate rifts on size alone.
 const GIANT_PLATE_AREA_FRAC: f64 = 0.40;
 
@@ -144,6 +147,10 @@ struct PairAcc {
     /// A young mean age marks a fresh rift ocean: those pairs are weld-immune
     /// so breakup fragments genuinely separate instead of being recaptured.
     age_len: f64,
+    /// Integral of the opening rate along the boundary, m/yr * m. A pair that
+    /// is actively pulling apart is weld-immune even before any ocean floor
+    /// exists in the gap (a rift cutting through continent).
+    open_len: f64,
 }
 
 /// One Drift / Refinement / RecentPast step.
@@ -206,8 +213,19 @@ pub(crate) fn step(
             let acc = pairs.entry(key).or_default();
             acc.len_m += e.len_m as f64;
             acc.rel_len += e.len_m as f64 * e.rel.length() as f64;
-            let age = planet.crust_age_myr[e.a as usize].min(planet.crust_age_myr[e.b as usize]);
+            // Rift-ocean age of this segment: continental crust keeps age 0
+            // by convention, so it must read as OLD here — only fresh
+            // *oceanic* floor marks an opening rift.
+            let side_age = |c: u32| {
+                if planet.crust_type[c as usize] == CrustType::Oceanic {
+                    planet.crust_age_myr[c as usize]
+                } else {
+                    1_000.0
+                }
+            };
+            let age = side_age(e.a).min(side_age(e.b));
             acc.age_len += e.len_m as f64 * age as f64;
+            acc.open_len += e.len_m as f64 * (-e.conv_m_yr).max(0.0) as f64;
         }
         match e.kind {
             Kind::Transform => {
@@ -882,10 +900,13 @@ fn weld_step(
     keys.sort_unstable();
     for key in keys {
         let acc = pairs[&key];
-        // A boundary whose younger side is fresh ridge crust is an OPENING
-        // rift: never weld or quiet-merge across it, or breakup fragments get
-        // recaptured before they can separate (the Pangaea acceptance test).
-        if acc.age_len / acc.len_m.max(1.0) < RIFT_WELD_IMMUNITY_MYR {
+        // An opening rift is weld-immune, or breakup fragments get recaptured
+        // before they can separate (the Pangaea acceptance test). Two signals:
+        // fresh ridge crust along the boundary (an established young ocean),
+        // or active divergence (a rift still cutting through continent).
+        let young_ocean = acc.age_len / acc.len_m.max(1.0) < RIFT_WELD_IMMUNITY_MYR;
+        let opening = acc.open_len / acc.len_m.max(1.0) > RIFT_OPEN_IMMUNITY_M_YR;
+        if young_ocean || opening {
             continue;
         }
         let welded = acc.coll_len_m >= WELD_MIN_PITCHES * pitch_m

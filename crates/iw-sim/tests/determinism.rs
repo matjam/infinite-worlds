@@ -186,13 +186,13 @@ fn rerun_of_the_first_phase_is_a_regenerate() {
 }
 
 #[test]
-fn rerun_rejects_a_mesh_level_change_and_a_missing_checkpoint() {
+fn rerun_rejects_a_budget_change_and_a_missing_checkpoint() {
     let store = Arc::new(MemoryStore::new());
     let mut sim = Simulation::new(
         config(42),
         tiny_mesh(),
         processes(),
-        store,
+        store.clone(),
         Arc::new(NullProgress),
     );
     // No checkpoints written yet.
@@ -202,10 +202,13 @@ fn rerun_rejects_a_mesh_level_change_and_a_missing_checkpoint() {
         "{err:#}"
     );
 
+    // With a checkpoint present, a cell-budget change is refused: it would
+    // invalidate every per-cell array.
+    store.save("phase-crustal_formation", sim.planet()).unwrap();
     let mut wrong = config(42);
-    wrong.subdivision_level = MIN_LEVEL + 1;
+    wrong.cell_budget += 54_321;
     let err = sim.rerun_from_phase(Phase::Drift, wrong).unwrap_err();
-    assert!(format!("{err:#}").contains("mesh level"), "{err:#}");
+    assert!(format!("{err:#}").contains("cell budget"), "{err:#}");
 }
 
 #[test]

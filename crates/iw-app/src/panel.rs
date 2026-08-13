@@ -14,9 +14,6 @@ use iw_render_vulkan::egui;
 /// 2–4 GB estimate in DESIGN.md §10.
 pub const EST_BYTES_PER_CELL: u64 = 900;
 
-/// Subdivision levels the panel offers. Below 4 the planet is a curiosity;
-/// above 9 the estimate leaves desktop territory.
-
 /// Human-readable phase names, in schedule order.
 pub fn phase_name(phase: Phase) -> &'static str {
     match phase {
