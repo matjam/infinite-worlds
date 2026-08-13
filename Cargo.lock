@@ -1449,10 +1449,7 @@ dependencies = [
  "glam",
  "iw-core",
  "iw-mesh",
- "log",
  "rayon",
- "rustc-hash",
- "smallvec",
 ]
 
 [[package]]
@@ -1465,9 +1462,7 @@ dependencies = [
  "log",
  "rand",
  "rand_pcg",
- "rayon",
  "rustc-hash",
- "smallvec",
 ]
 
 [[package]]
