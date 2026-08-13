@@ -29,7 +29,9 @@ use rayon::prelude::*;
 
 pub mod hull;
 mod icosa;
+pub mod sample;
 mod subdiv;
+pub mod voronoi;
 
 use subdiv::Subdiv;
 
@@ -92,7 +94,23 @@ impl Mesh {
         10 * 4usize.pow(level as u32) + 2
     }
 
-    /// Build the Goldberg mesh for `level` (0..=10). Deterministic.
+    /// Build a terrain-driven Voronoi mesh (docs/voronoi-v2.md): `budget`
+    /// cells whose sizes follow `density` (values in (0, 1]; 1 = densest,
+    /// i.e. smallest cells). Deterministic in `(budget, seed, density)`.
+    pub fn build_voronoi(budget: u32, seed: u64, density: &(dyn Fn(Vec3) -> f32 + Sync)) -> Mesh {
+        let gens = sample::sample_generators(budget.max(64) as usize, seed, density, 2);
+        voronoi::build_from_generators(&gens)
+    }
+
+    /// Rebuild the Voronoi mesh from explicit generators (checkpoint resume:
+    /// the generators are simulation state; the hull is deterministic).
+    pub fn build_from_generators(generators: &[glam::DVec3]) -> Mesh {
+        voronoi::build_from_generators(generators)
+    }
+
+    /// Build the legacy Goldberg mesh for `level` (0..=10). Deterministic.
+    /// Retained for unit tests and comparison; the pipeline uses
+    /// [`Mesh::build_voronoi`].
     ///
     /// # Panics
     /// If `level > 10`.
