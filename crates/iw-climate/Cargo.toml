@@ -9,4 +9,3 @@ iw-core.workspace = true
 iw-mesh.workspace = true
 glam.workspace = true
 rayon.workspace = true
-log.workspace = true
