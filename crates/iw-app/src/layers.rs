@@ -397,6 +397,12 @@ pub fn beauty_cell(cells: &ViewCells, sea_level_m: f32, cell: usize, detail: f32
         precip_mm_yr: cells.precip_mm_yr[cell],
         detail,
         biome: cells.biome[cell],
+        volcanic: match cells.top_rock[cell] {
+            Some(iw_core::RockType::Basalt)
+            | Some(iw_core::RockType::Andesite)
+            | Some(iw_core::RockType::Tuff) => 1.0,
+            _ => 0.0,
+        },
     }
 }
 

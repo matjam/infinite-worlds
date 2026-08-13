@@ -94,6 +94,25 @@ void main() {
         albedo = mix(albedo, FOAM_ALBEDO, foam * 0.4);
     }
 
+    // --- Sub-cell relief detail: hills as normal perturbation (land only).
+    if (!water && ice_t < 0.5) {
+        float fp = length(fwidth(S)) * HILL_FREQ_B;
+        float fade = 1.0 - smoothstep(HILL_FADE_FOOTPRINT, HILL_FADE_FOOTPRINT * 2.0, fp);
+        if (fade > 0.0) {
+            vec3 e1 = normalize(cross(S, abs(S.z) < 0.9 ? vec3(0, 0, 1) : vec3(1, 0, 0)));
+            vec3 e2 = cross(S, e1);
+            float slope = 1.0 - clamp(dot(N, S), 0.0, 1.0);
+            float amp = (HILL_BASE + HILL_SLOPE_GAIN * slope) * fade;
+            float e = 1.0 / HILL_FREQ_B;
+            float h0 = shore_vnoise(S * HILL_FREQ_A) * 0.7 + shore_vnoise(S * HILL_FREQ_B) * 0.3;
+            vec3 px = S + e1 * e;
+            vec3 py = S + e2 * e;
+            float hx = shore_vnoise(px * HILL_FREQ_A) * 0.7 + shore_vnoise(px * HILL_FREQ_B) * 0.3 - h0;
+            float hy = shore_vnoise(py * HILL_FREQ_A) * 0.7 + shore_vnoise(py * HILL_FREQ_B) * 0.3 - h0;
+            N = normalize(N + (e1 * hx + e2 * hy) * (amp * 4.0));
+        }
+    }
+
     // Sphere-level day mask: relief may brighten a slope, but never on the
     // night side.
     float day = smoothstep(TERMINATOR_LO, TERMINATOR_HI, dot(S, L));

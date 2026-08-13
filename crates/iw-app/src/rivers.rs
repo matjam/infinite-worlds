@@ -18,8 +18,8 @@ use iw_render_vulkan::globe::RiverVertex;
 const MIN_FLUX_M3_YR: f32 = 5.0e9;
 /// Flux at which a ribbon reaches full width and opacity.
 const MAX_FLUX_M3_YR: f32 = 3.0e11;
-const MIN_HALF_WIDTH_KM: f32 = 4.0;
-const MAX_HALF_WIDTH_KM: f32 = 18.0;
+const MIN_HALF_WIDTH_KM: f32 = 2.5;
+const MAX_HALF_WIDTH_KM: f32 = 10.0;
 /// Slightly lighter than the ocean fill so rivers read against coastal water.
 const RIVER_RGB: [f32; 3] = [0.13, 0.33, 0.55];
 

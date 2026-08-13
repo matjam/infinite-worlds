@@ -31,9 +31,13 @@ const BASE_RAINOUT: f32 = 0.07;
 /// steers the global rain SHARE between land and sea (the water-balance
 /// rescale pins the total), and the un-biased physics is the honest baseline
 /// to calibrate from.
-const LAND_RAINOUT_BIAS: f32 = 1.0;
+/// Re-tuned ON WORKING TRANSPORT (the 1.7/0.72 era was compensating for the
+/// dead advection operator): at 1.0/1.0 a 28%-land world kept only a third
+/// of the rain share Earth's land gets and two thirds of the land read
+/// desert. 1.3/0.9 steers share without re-strangling the inland fetch.
+const LAND_RAINOUT_BIAS: f32 = 1.3;
 /// Rainout multiplier over open water: maritime air holds on to its moisture.
-const OCEAN_RAINOUT_BIAS: f32 = 1.0;
+const OCEAN_RAINOUT_BIAS: f32 = 0.9;
 /// ITCZ convergence bonus at the equator.
 const ITCZ_GAIN: f32 = 0.30;
 /// Gaussian width of the ITCZ, degrees.

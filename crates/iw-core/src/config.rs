@@ -67,11 +67,13 @@ impl Default for PlanetConfig {
             cell_budget: 250_000,
             phase_durations_myr: [200.0, 200.0, 75.0, 2.0],
             phase_dt_myr: [1.0, 0.5, 0.25, 0.005],
-            // 0.93 Earth oceans, not 1.0: these worlds' post-breakup oceans
+            // 0.88 Earth oceans, not 1.0: these worlds' post-breakup oceans
             // are younger and shallower than Earth's (fresh ridge crust
-            // floats high), so a full Earth ocean drowns the margins and
-            // lands ~20% land. 0.93 restores an Earth-like ~26-29%.
-            water_budget: 0.93,
+            // floats high) and hotspot volcanism erupts real basalt volume
+            // into the basins over the run, so a full Earth ocean drowns the
+            // margins to ~20% land. 0.88 balances land area against the cold-dry
+            // drift that comes with exposing high margins.
+            water_budget: 0.88,
             temperature_offset_c: 0.0,
             axial_tilt_deg: 23.4,
             precip_multiplier: 1.0,

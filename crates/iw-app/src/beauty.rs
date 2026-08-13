@@ -68,6 +68,10 @@ pub const ROCK_FULL_M: f32 = 4_200.0;
 pub const ROCK_MAX_BLEND: f32 = 0.80;
 /// Exposed high-altitude rock, warm (dry) and cold variants.
 pub const ROCK_WARM_RGB: [u8; 3] = [0x96, 0x82, 0x6a];
+/// Fresh volcanic surface (basalt flows, ash fields).
+pub const VOLCANIC_RGB: [u8; 3] = [0x3a, 0x32, 0x30];
+/// Ceiling on the volcanic darkening so relief shading survives on top.
+pub const VOLCANIC_MAX_BLEND: f32 = 0.75;
 /// See [`ROCK_WARM_RGB`].
 pub const ROCK_COLD_RGB: [u8; 3] = [0x84, 0x82, 0x80];
 /// Annual mean temperature (C) at which permanent snow starts to show.
@@ -142,6 +146,11 @@ pub struct BeautyCell {
     /// history snapshots and tests may leave it 0.
     pub detail: f32,
     pub biome: Biome,
+    /// 1.0 when the topmost stratum is fresh volcanic rock (basalt/andesite/
+    /// tuff): lava fields and cones darken toward basalt where vegetation is
+    /// thin, which is what makes hotspot islands and arc chains READ as
+    /// volcanoes from orbit.
+    pub volcanic: f32,
 }
 
 impl Default for BeautyCell {
@@ -157,6 +166,7 @@ impl Default for BeautyCell {
             precip_mm_yr: 900.0,
             detail: 0.0,
             biome: Biome::Unclassified,
+            volcanic: 0.0,
         }
     }
 }
@@ -271,10 +281,15 @@ pub fn land_color(cell: &BeautyCell) -> [u8; 3] {
         _ => {}
     }
 
+    // Fresh volcanic surfaces darken toward basalt where vegetation is thin;
+    // a jungle-covered old shield stays green (Hawaii does).
+    let lava = cell.volcanic * (1.0 - veg).max(0.0) * VOLCANIC_MAX_BLEND;
+    base = lerp(base, VOLCANIC_RGB, lava);
+
     // Bare rock takes over above the treeline (colder rock is greyer), then
     // permanent snow above that.
     let rock_rgb = lerp(ROCK_COLD_RGB, ROCK_WARM_RGB, soil_warmth);
-    let rock = smoothstep(ROCK_START_M, ROCK_FULL_M, rel) * ROCK_MAX_BLEND;
+    let rock = smoothstep(ROCK_START_M, ROCK_FULL_M, rel) * ROCK_MAX_BLEND * (1.0 - lava);
     let snow = smoothstep(SNOW_START_C, SNOW_FULL_C, t) * SNOW_MAX_BLEND;
     let base = lerp(lerp(base, rock_rgb, rock), SNOW_RGB, snow);
 

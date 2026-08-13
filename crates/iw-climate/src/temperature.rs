@@ -276,8 +276,8 @@ pub(crate) fn update(planet: &mut Planet, mesh: &Mesh, dist: &[u8]) {
         area_sum += a;
     }
     let raw_mean = (raw_sum / area_sum.max(1.0)) as f32;
-    let thermostat =
-        (THERMOSTAT_GAIN * (THERMOSTAT_REF_C - raw_mean)).clamp(-THERMOSTAT_MAX_C, THERMOSTAT_MAX_C);
+    let thermostat = (THERMOSTAT_GAIN * (THERMOSTAT_REF_C - raw_mean))
+        .clamp(-THERMOSTAT_MAX_C, THERMOSTAT_MAX_C);
 
     planet
         .temperature_c

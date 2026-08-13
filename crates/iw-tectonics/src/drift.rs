@@ -136,8 +136,17 @@ const SHAPE_TEAR_DEFICIT: f64 = 0.32;
 /// absorb/subduct machinery's job, not the rift engine's.
 const SHAPE_TEAR_MIN_FRAC: f64 = 0.04;
 
-/// Basalt erupted over a plume, m/Myr at strength 1.
-const HOTSPOT_DEPOSIT_M_MYR: f32 = 40.0;
+/// Basalt erupted over a plume, m/Myr at effective strength 1.
+///
+/// Calibration: the plate carries a cell over the plume in ~1 Myr, so this
+/// is roughly the WHOLE pile one island gets. At 40 every chain stayed a
+/// string of 40-80 m seamounts and no world ever had a Hawaii — but the
+/// plume never turns off, so the rate multiplies into the entire 20,000 km
+/// trail: at a flat 1500 the erupted volume displaced enough ocean to crash
+/// land from 26% to 12%. The strength SKEW is the fix, not the rate alone:
+/// eruption scales with strength squared, so most chains are modest
+/// seamount strings and only the rare strong plume builds 3 km shields.
+const HOTSPOT_DEPOSIT_M_MYR: f32 = 600.0;
 const HOTSPOT_MAX_OCEANIC_M: f32 = 25_000.0;
 const HOTSPOT_MAX_CONTINENTAL_M: f32 = 50_000.0;
 
@@ -549,7 +558,7 @@ fn ensure_hotspots(planet: &mut Planet, ctx: &mut StepCtx) {
     }
     for _ in 0..planet.config.hotspot_count {
         let pos = random_unit(&mut ctx.rng);
-        let strength = ctx.rng.random_range(0.5f32..2.0);
+        let strength = ctx.rng.random_range(0.3f32..1.8);
         planet.hotspots.push(Hotspot { pos, strength });
     }
 }
@@ -565,7 +574,10 @@ fn hotspots(planet: &mut Planet, mesh: &Mesh, cache: &MeshCache, dt_myr: f64, ct
     for (pos, strength) in plumes {
         let c = mesh.cell_at(pos);
         planet.tectonic_flags[c as usize] |= cell_flags::HOTSPOT;
-        let d = HOTSPOT_DEPOSIT_M_MYR * strength * vigor * dt_myr as f32;
+        // Squared: the strength draw spans 0.3..1.8, so most plumes erupt a
+        // tenth of what the strongest do — seamount strings are the rule,
+        // breaching shields the exception.
+        let d = HOTSPOT_DEPOSIT_M_MYR * strength * strength * vigor * dt_myr as f32;
         if d <= 0.0 {
             continue;
         }

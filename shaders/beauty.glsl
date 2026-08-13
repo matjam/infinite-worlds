@@ -116,6 +116,26 @@ const float CLOUD_SOFT = 0.34;
 /// Ambient floor of the cloud lighting (clouds are bright even in shadow).
 const float CLOUD_AMBIENT = 0.22;
 
+// --- sub-cell relief detail -------------------------------------------------
+//
+// At any usable cell budget, hill-scale relief (1..10 km wavelength) is
+// sub-grid: it cannot exist in the elevation field and has to be shading.
+// The fragment stage perturbs the relief normal with two octaves of value
+// noise whose gradient is taken by finite differences on the sphere. The
+// amplitude rides the local slope, so plains stay gently rolling while the
+// flanks of real ranges break into hills; a footprint fade keeps the far
+// view from shimmering.
+
+/// Base bump strength on flat land (rolling plains).
+const float HILL_BASE = 0.06;
+/// Additional bump strength per unit of resolved-relief slope.
+const float HILL_SLOPE_GAIN = 1.4;
+/// Noise frequencies (cycles over the unit sphere) and their weights.
+const float HILL_FREQ_A = 900.0;
+const float HILL_FREQ_B = 2600.0;
+/// Screen-footprint (in noise cells per pixel) beyond which detail fades out.
+const float HILL_FADE_FOOTPRINT = 0.5;
+
 // --- shoreline crinkle ------------------------------------------------------
 
 /// Amplitude of the noise that offsets the landness contour. MUST stay below

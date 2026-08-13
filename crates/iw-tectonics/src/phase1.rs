@@ -249,8 +249,10 @@ pub(crate) fn partition_into_plates(
     let mut split_pair: Option<(u16, u16)> = None;
     {
         let total_cont: f64 = cluster_mass.iter().sum();
-        let big = (0..cluster_mass.len()).max_by(|a, b| cluster_mass[*a].total_cmp(&cluster_mass[*b]));
-        if let Some(big) = big.filter(|b| total_cont > 0.0 && cluster_mass[*b] > 0.55 * total_cont) {
+        let big =
+            (0..cluster_mass.len()).max_by(|a, b| cluster_mass[*a].total_cmp(&cluster_mass[*b]));
+        if let Some(big) = big.filter(|b| total_cont > 0.0 && cluster_mass[*b] > 0.55 * total_cont)
+        {
             let mut csum = vec![DVec3::ZERO; ncr];
             for c in 0..n {
                 let p = planet.plate_id[c] as usize;
@@ -287,7 +289,7 @@ pub(crate) fn partition_into_plates(
                         moved += mass[k];
                     }
                 }
-                cluster_mass[big as usize] -= moved;
+                cluster_mass[big] -= moved;
                 *cluster_mass.last_mut().expect("just pushed") = moved;
                 if moved > 0.0 {
                     split_pair = Some((big as u16, new_id));
@@ -451,7 +453,10 @@ pub(crate) fn partition_into_plates(
             let cb = cluster_sum[bi].normalize_or(DVec3::Z).as_vec3();
             let kick = |plate: &mut Plate, from: glam::Vec3, toward: glam::Vec3| {
                 let w = plate.euler_pole * plate.omega_rad_myr
-                    + omega_for_velocity(from, -tangent_toward(from, toward) * HANDOFF_SPLIT_KICK_M_YR);
+                    + omega_for_velocity(
+                        from,
+                        -tangent_toward(from, toward) * HANDOFF_SPLIT_KICK_M_YR,
+                    );
                 let omega = w.length();
                 plate.euler_pole = if omega > 1e-12 { w / omega } else { DVec3::Z };
                 plate.omega_rad_myr = omega;

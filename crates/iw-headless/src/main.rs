@@ -43,7 +43,9 @@ fn build_config(args: &GenArgs) -> anyhow::Result<PlanetConfig> {
         cell_budget: args
             .budget
             .unwrap_or_else(|| (10u32 * 4u32.pow(args.level.min(10) as u32) + 2).max(10_000)),
-        water_budget: args.water,
+        water_budget: args
+            .water
+            .unwrap_or(iw_core::PlanetConfig::default().water_budget),
         ..PlanetConfig::default()
     };
     if let Some(d) = &args.durations {

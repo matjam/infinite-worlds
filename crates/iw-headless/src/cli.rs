@@ -44,9 +44,11 @@ pub struct GenArgs {
     /// Output directory for checkpoints, history and (optionally) maps.
     #[arg(long)]
     pub out: PathBuf,
-    /// Surface water budget, in Earth-ocean-volume units.
-    #[arg(long, default_value_t = 1.0)]
-    pub water: f64,
+    /// Surface water budget, in Earth-ocean-volume units. Defaults to the
+    /// engine's calibrated default (see `PlanetConfig::default`), NOT 1.0 —
+    /// a hardcoded 1.0 here silently overrode the calibration on every run.
+    #[arg(long)]
+    pub water: Option<f64>,
     /// Comma-separated phase durations in Myr: crust,drift,refine,recent.
     /// Defaults to [`iw_core::PlanetConfig::default`]'s schedule.
     #[arg(long)]
