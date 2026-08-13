@@ -1291,13 +1291,22 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "crossbeam-channel",
  "env_logger",
  "glam",
+ "iw-biomes",
+ "iw-climate",
  "iw-core",
+ "iw-export-png",
+ "iw-geology",
  "iw-mesh",
  "iw-render-vulkan",
  "iw-sim",
+ "iw-store-postcard",
+ "iw-surface",
+ "iw-tectonics",
  "log",
+ "rayon",
 ]
 
 [[package]]

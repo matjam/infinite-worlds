@@ -99,11 +99,22 @@ impl Ui {
         self.state.on_window_event(window, event).consumed
     }
 
-    /// Build one frame of UI.
+    /// Build one frame of UI from the built-in overlay.
     pub fn run(&mut self, window: &Window, state: &mut UiState) -> UiOutput {
-        let input = self.state.take_egui_input(window);
         state.mode_toggled = false;
-        let full = self.ctx.run_ui(input, |ui| overlay(ui.ctx(), state));
+        self.run_with(window, |ui| overlay(ui.ctx(), state))
+    }
+
+    /// Build one frame of UI from a caller-supplied closure.
+    ///
+    /// The renderer only needs the tessellated output, so an application that
+    /// has outgrown [`UiState`] (panels, inspectors, scrubbers) draws whatever
+    /// it likes here instead. `build` is handed the root [`egui::Ui`] of the
+    /// frame (panels need it; windows only need `ui.ctx()`). egui may call it
+    /// more than once per frame, so it takes `FnMut`.
+    pub fn run_with(&mut self, window: &Window, mut build: impl FnMut(&mut egui::Ui)) -> UiOutput {
+        let input = self.state.take_egui_input(window);
+        let full = self.ctx.run_ui(input, |ui| build(ui));
         self.state
             .handle_platform_output(window, full.platform_output);
         let primitives = self.ctx.tessellate(full.shapes, full.pixels_per_point);
@@ -114,6 +125,12 @@ impl Ui {
             wants_pointer: self.ctx.egui_wants_pointer_input(),
             wants_keyboard: self.ctx.egui_wants_keyboard_input(),
         }
+    }
+
+    /// The egui context, for callers that need it outside a frame (fonts,
+    /// style, pixels-per-point).
+    pub fn ctx(&self) -> &egui::Context {
+        &self.ctx
     }
 }
 

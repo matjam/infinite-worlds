@@ -272,3 +272,82 @@ fn views_are_published_from_the_worker() {
     assert!(cell.load_full().is_some());
     sim.shutdown();
 }
+
+/// Deposits one distinct stratum per step so a queried column has structure.
+struct DepositProcess;
+
+impl Process for DepositProcess {
+    fn name(&self) -> &'static str {
+        "deposit"
+    }
+
+    fn step(
+        &mut self,
+        planet: &mut iw_core::Planet,
+        _mesh: &Mesh,
+        _dt_myr: f64,
+        _ctx: &mut iw_core::StepCtx,
+    ) {
+        let time = planet.time_myr;
+        // Alternating rock types so `deposit` cannot merge them into one.
+        let rock = if planet.step_index.is_multiple_of(2) {
+            iw_core::RockType::Basalt
+        } else {
+            iw_core::RockType::Shale
+        };
+        planet.columns.deposit(0, rock, 100.0, time);
+    }
+}
+
+#[test]
+fn query_column_answers_while_the_worker_runs() {
+    let sim = SimHandle::spawn(
+        config(11),
+        tiny_mesh(),
+        vec![
+            Box::new(SlowProcess::new(STEP_MS)),
+            Box::new(DepositProcess),
+        ],
+        Arc::new(MemoryStore::new()),
+        Arc::new(NullProgress),
+        counting_mesh_builder(Arc::new(AtomicUsize::new(0))),
+    );
+    sim.start();
+    assert!(wait_for(2000, || sim.status().step_index >= 3));
+
+    let column = sim
+        .query_column(0, Duration::from_secs(2))
+        .expect("worker answered the column query");
+    assert!(
+        column.len() >= 2,
+        "expected a stacked column, got {column:?}"
+    );
+    assert!(column.iter().all(|s| s.thickness_m > 0.0));
+    // Bottom-to-top: deposition times must not decrease.
+    assert!(column
+        .windows(2)
+        .all(|w| w[0].deposited_myr <= w[1].deposited_myr));
+
+    // A cell with nothing deposited, and an out-of-range cell, both answer.
+    assert_eq!(
+        sim.query_column(1, Duration::from_secs(2)),
+        Some(Vec::new())
+    );
+    assert_eq!(
+        sim.query_column(9999, Duration::from_secs(2)),
+        Some(Vec::new())
+    );
+    sim.shutdown();
+}
+
+#[test]
+fn query_column_after_shutdown_does_not_block() {
+    let sim = spawn(config(12), Arc::new(AtomicUsize::new(0)));
+    let rx = sim.request_column(0);
+    sim.shutdown();
+    // Either the worker answered before exiting, or the channel closed; both
+    // resolve promptly rather than hanging the UI thread.
+    let t = Instant::now();
+    let _ = rx.recv_timeout(Duration::from_millis(500));
+    assert!(t.elapsed() < Duration::from_millis(600));
+}

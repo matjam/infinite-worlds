@@ -7,7 +7,7 @@ use std::thread::JoinHandle;
 
 use arc_swap::{ArcSwap, ArcSwapOption};
 use crossbeam_channel::{Receiver, Sender, TryRecvError};
-use iw_core::{Phase, PlanetConfig, PlanetView, Process, ProgressEvent, ProgressSink};
+use iw_core::{Phase, PlanetConfig, PlanetView, Process, ProgressEvent, ProgressSink, Stratum};
 use iw_mesh::Mesh;
 
 use crate::sim::Simulation;
@@ -28,6 +28,14 @@ pub enum SimCommand {
     /// this config. Leaves the worker paused. Rejected (logged) if the config
     /// changes the subdivision level.
     RerunFromPhase(Phase, PlanetConfig),
+    /// Ask for one cell's stratigraphic column, answered on the given channel.
+    ///
+    /// `PlanetView` carries only the topmost rock of each column (the full
+    /// stack is far too big to snapshot every publish), so the cell inspector
+    /// asks the worker instead: it owns the `Planet` and answers between
+    /// steps, when the state is consistent. An out-of-range cell, or a
+    /// receiver that has hung up, is answered with nothing.
+    QueryColumn(u32, Sender<Vec<Stratum>>),
     /// Finish the current step, then exit the thread.
     Shutdown,
 }
@@ -159,6 +167,24 @@ impl SimHandle {
     /// Re-run from a phase boundary (see [`SimCommand::RerunFromPhase`]).
     pub fn rerun_from_phase(&self, phase: Phase, config: PlanetConfig) {
         self.send(SimCommand::RerunFromPhase(phase, config));
+    }
+
+    /// Ask the worker for `cell`'s stratigraphic column without blocking.
+    ///
+    /// The answer arrives on the returned channel once the worker finishes the
+    /// step it is in (poll it with `try_recv`). Out-of-range cells answer with
+    /// an empty column. If the worker has already exited, the returned channel
+    /// is closed and never yields a value.
+    pub fn request_column(&self, cell: u32) -> Receiver<Vec<Stratum>> {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        self.send(SimCommand::QueryColumn(cell, tx));
+        rx
+    }
+
+    /// Blocking convenience wrapper around [`SimHandle::request_column`].
+    /// Returns `None` if the worker did not answer within `timeout`.
+    pub fn query_column(&self, cell: u32, timeout: std::time::Duration) -> Option<Vec<Stratum>> {
+        self.request_column(cell).recv_timeout(timeout).ok()
     }
 
     /// Current worker status.
@@ -333,6 +359,16 @@ impl Worker {
                     self.mode = Mode::Idle;
                     self.pending_steps = 0;
                 }
+            }
+            SimCommand::QueryColumn(cell, reply) => {
+                let planet = self.sim.planet();
+                let column = if (cell as usize) < planet.n_cells() {
+                    planet.columns.col(cell).to_vec()
+                } else {
+                    Vec::new()
+                };
+                // The UI may have given up waiting; that is not an error.
+                let _ = reply.send(column);
             }
             SimCommand::Shutdown => return false,
         }
