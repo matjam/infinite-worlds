@@ -99,6 +99,11 @@ struct Args {
     /// is missing.
     #[arg(long)]
     resume: bool,
+    /// Load the final checkpoint from the planet directory and display it
+    /// without running any simulation (instant multi-angle screenshots of a
+    /// finished planet). The planet's own config decides the mesh level.
+    #[arg(long)]
+    load: bool,
     /// Initial camera focus latitude/longitude in degrees (reproducible
     /// framing for screenshots).
     #[arg(long, allow_hyphen_values = true)]
@@ -328,6 +333,29 @@ impl App {
 
         let mut renderer = Renderer::new(window.as_ref(), self.surface_size, "Infinite Worlds")?;
 
+        // --load: pull the finished planet off disk before the mesh is built,
+        // so its config (and mesh level) comes from the checkpoint itself.
+        let loaded: Option<iw_core::Planet> = if self.args.load && !self.args.test_sphere {
+            let dir = self.planet_dir(&self.config);
+            let tag = "phase-recent_past";
+            match iw_store_postcard::FileStore::new(dir.clone())
+                .and_then(|s| iw_core::CheckpointStore::load(&s, tag))
+            {
+                Ok(p) => {
+                    self.config = p.config.clone();
+                    self.log
+                        .push(format!("loaded {tag} from {}", dir.display()));
+                    Some(p)
+                }
+                Err(e) => {
+                    log::warn!("--load failed ({e:#}); simulating instead");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let t0 = Instant::now();
         let mesh = if self.args.test_sphere {
             log::info!("building icosphere test mesh (level {})", self.args.level);
@@ -365,7 +393,15 @@ impl App {
         self.window = Some(window);
         self.mesh = Some(mesh);
 
-        if !self.args.test_sphere {
+        if let Some(planet) = loaded {
+            let mesh = self.mesh.as_ref().expect("mesh set above").clone();
+            let view = PlanetView::capture(1, &planet, &mesh);
+            self.applied_version = view.version;
+            self.scales = LayerScales::from_cells(&view.cells);
+            self.view = Some(view);
+            self.refresh_cells()?;
+            self.refresh_clouds(false)?;
+        } else if !self.args.test_sphere {
             self.spawn_sim()?;
         }
         Ok(())
@@ -1175,6 +1211,11 @@ impl App {
 
     fn status_line(&self) -> String {
         match self.sim.as_ref() {
+            None if self.args.load => format!(
+                "loaded planet: seed {} · {:.0} Myr (static)",
+                self.config.seed,
+                self.view.as_ref().map(|v| v.time_myr).unwrap_or(0.0)
+            ),
             None => "static test sphere (no simulation)".to_string(),
             Some(sim) => {
                 let s = sim.handle.status();
