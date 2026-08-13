@@ -125,7 +125,7 @@ pub const MAX_PLATES: usize = 64;
 /// struct holds only mesh-derived caches and scratch buffers.
 pub struct TectonicsProcess {
     cache: Option<MeshCache>,
-    cratons: Option<craton::CratonSet>,
+    genesis: Option<craton::Genesis>,
     scratch: Scratch,
 }
 
@@ -140,7 +140,7 @@ impl TectonicsProcess {
     pub fn new() -> TectonicsProcess {
         TectonicsProcess {
             cache: None,
-            cratons: None,
+            genesis: None,
             scratch: Scratch::default(),
         }
     }
@@ -251,14 +251,14 @@ impl Process for TectonicsProcess {
             Phase::CrustalFormation => {
                 let count = planet.config.craton_count as usize;
                 if self
-                    .cratons
+                    .genesis
                     .as_ref()
                     .is_none_or(|s| !s.matches(seed, count, cache.pitch_m))
                 {
-                    self.cratons = Some(craton::CratonSet::new(seed, count, cache.pitch_m));
+                    self.genesis = Some(craton::Genesis::new(seed, count, cache.pitch_m));
                 }
-                let cratons = self.cratons.as_ref().expect("craton set just built");
-                phase1::step(planet, mesh, dt_myr, ctx, cache, cratons, &mut self.scratch)
+                let genesis = self.genesis.as_ref().expect("genesis just built");
+                phase1::step(planet, mesh, dt_myr, ctx, cache, genesis, &mut self.scratch)
             }
             Phase::Drift | Phase::Refinement | Phase::RecentPast => {
                 drift::step(planet, mesh, dt_myr, ctx, cache, &mut self.scratch)

@@ -239,77 +239,207 @@ impl CratonShape {
     }
 }
 
-/// The craton shapes of one planet. Rebuilt (identically) by any process
-/// instance from `(seed, count, detail octaves)`; cached because the centroid
-/// quadrature is not free.
-pub(crate) struct CratonSet {
+// --- supercontinent genesis (Pangaea-first) ---------------------------------
+//
+// The planet starts from ONE Gondwana-scale landmass (plus at most two
+// microcontinents), and the drift era carves it up along rifts — fragments
+// inherit jigsaw-fit conjugate margins from the rift graph, the way Earth's
+// continents did, instead of betraying a bottom-up assembly of blobs.
+
+/// Area fraction handed to microcontinents when the core count allows any.
+const MICRO_AREA_FRAC: f64 = 0.05;
+/// Mobile-belt thickness between shield cores of the supercontinent, m.
+const BELT_THICKNESS_M: f32 = 34_500.0;
+/// Thickness the landmass tapers to at its rim (drowned margin), m.
+const RIM_THICKNESS_M: f32 = 29_000.0;
+/// Radial fraction of the outline where the rim taper starts.
+const RIM_START_F: f32 = 0.78;
+/// Placement attempts for shield cores / microcontinents.
+const GENESIS_TRIES: u32 = 4_096;
+
+/// The primordial landmasses of one planet: a supercontinent with embedded
+/// shield cores, plus 0-2 microcontinents. Pure function of
+/// `(seed, core count, mesh pitch)` — rebuilt identically by any process
+/// instance, so nothing here is simulation state.
+pub(crate) struct Genesis {
     seed: u64,
+    count: usize,
     detail_octaves: u32,
-    shapes: Vec<CratonShape>,
+    /// (shape, world-to-local frame). Index 0 is the supercontinent.
+    masses: Vec<(CratonShape, Quat)>,
+    /// Shield cores inside the supercontinent — thickness highs only.
+    cores: Vec<(CratonShape, Quat)>,
 }
 
-impl CratonSet {
-    /// Build the shapes for `count` cratons. `pitch_m` is the mesh's mean cell
-    /// spacing; it fixes how many octaves the coastline gets, so a level-9
-    /// planet has cell-scale crenellation and a level-5 planet does not waste
-    /// time on octaves it cannot resolve.
-    pub(crate) fn new(seed: u64, count: usize, pitch_m: f64) -> CratonSet {
+impl Genesis {
+    pub(crate) fn new(seed: u64, count: usize, pitch_m: f64) -> Genesis {
         let detail_octaves = detail_octaves(pitch_m);
-        let mut rng = rng_for(seed, "tectonics/craton-shape", 0);
-        let shapes = (0..count)
-            .map(|_| {
-                let radius_m = next_radius_m(&mut rng, count);
-                let mut shape = CratonShape {
-                    radius_m,
-                    radius_rad: (radius_m / EARTH_RADIUS_M) as f32,
-                    noise: Noise3::new(rng.random::<u64>()),
-                    detail_octaves,
-                    centroid_local: Vec3::Z,
-                };
-                shape.centroid_local = shape.centroid();
-                shape
-            })
-            .collect();
-        CratonSet {
+        let mut rng = rng_for(seed, "tectonics/genesis", 0);
+        let micro_n = match count {
+            0..=5 => 0,
+            6..=9 => 1,
+            _ => 2,
+        };
+        let main_frac =
+            CONTINENTAL_TARGET_FRACTION - if micro_n > 0 { MICRO_AREA_FRAC } else { 0.0 };
+
+        let make_shape = |radius_m: f64, rng: &mut rand_pcg::Pcg64Mcg| {
+            let mut shape = CratonShape {
+                radius_m,
+                radius_rad: (radius_m / EARTH_RADIUS_M) as f32,
+                noise: Noise3::new(rng.random::<u64>()),
+                detail_octaves,
+                centroid_local: Vec3::Z,
+            };
+            shape.centroid_local = shape.centroid();
+            shape
+        };
+
+        // The supercontinent, placed by its cap pole.
+        let main = make_shape(cap_radius_m(main_frac), &mut rng);
+        let main_pole = random_unit_dir(&mut rng);
+        let main_frame = Quat::from_rotation_arc(main_pole, Vec3::Z);
+        let mut masses = vec![(main, main_frame)];
+
+        // Microcontinents: well clear of the main mass.
+        for _ in 0..micro_n {
+            let shape = make_shape(cap_radius_m(MICRO_AREA_FRAC / micro_n as f64), &mut rng);
+            let clearance = masses[0].0.max_radius_rad() + shape.max_radius_rad() + 0.15;
+            let mut placed = None;
+            for _ in 0..GENESIS_TRIES {
+                let p = random_unit_dir(&mut rng);
+                let far_from_main = p.dot(main_pole).clamp(-1.0, 1.0).acos() > clearance;
+                let far_from_micros = masses[1..].iter().all(|(s, f)| {
+                    (f.inverse() * Vec3::Z).dot(p).clamp(-1.0, 1.0).acos()
+                        > s.max_radius_rad() + shape.max_radius_rad() + 0.1
+                });
+                if far_from_main && far_from_micros {
+                    placed = Some(p);
+                    break;
+                }
+            }
+            // A crowded sphere just skips the microcontinent.
+            if let Some(p) = placed {
+                let frame = Quat::from_rotation_arc(p, Vec3::Z);
+                masses.push((shape, frame));
+            }
+        }
+
+        // Shield cores: inside the supercontinent, mutually spaced.
+        let mut cores: Vec<(CratonShape, Quat)> = Vec::with_capacity(count);
+        let core_area = main_frac * 0.55 / count.max(1) as f64;
+        for _ in 0..count {
+            let shape = make_shape(
+                cap_radius_m(
+                    core_area * rng.random_range(CRATON_AREA_SPREAD.0..CRATON_AREA_SPREAD.1),
+                ),
+                &mut rng,
+            );
+            let mut factor = 1.1f64;
+            let mut placed = None;
+            for attempt in 0..GENESIS_TRIES {
+                if attempt > 0 && attempt % 128 == 0 {
+                    factor = (factor * 0.97).max(0.55);
+                }
+                let p = random_unit_dir(&mut rng);
+                let inside = masses[0]
+                    .0
+                    .contains(masses[0].1 * p)
+                    .map(|f| f < 0.8)
+                    .unwrap_or(false);
+                if !inside {
+                    continue;
+                }
+                let spaced = cores.iter().all(|(s, f)| {
+                    let center = f.inverse() * Vec3::Z;
+                    (center.dot(p).clamp(-1.0, 1.0).acos() as f64) * EARTH_RADIUS_M
+                        >= (s.radius_m + shape.radius_m) * factor
+                });
+                if spaced {
+                    placed = Some(p);
+                    break;
+                }
+            }
+            if let Some(p) = placed {
+                cores.push((shape, Quat::from_rotation_arc(p, Vec3::Z)));
+            }
+        }
+
+        Genesis {
             seed,
+            count,
             detail_octaves,
-            shapes,
+            masses,
+            cores,
         }
     }
 
-    /// Just the mean radii, without the centroid quadrature — for callers that
-    /// only need the seeder's spacing constraint.
-    pub(crate) fn radii_m(seed: u64, count: usize) -> Vec<f64> {
-        let mut rng = rng_for(seed, "tectonics/craton-shape", 0);
-        (0..count)
-            .map(|_| {
-                let r = next_radius_m(&mut rng, count);
-                // Keep the draw sequence identical to `new`.
-                let _: u64 = rng.random();
-                r
-            })
-            .collect()
-    }
-
-    /// True when this set is the one `(seed, count, pitch)` asks for.
+    /// True when this genesis is the one `(seed, count, pitch)` asks for.
     pub(crate) fn matches(&self, seed: u64, count: usize, pitch_m: f64) -> bool {
-        self.seed == seed
-            && self.shapes.len() == count
-            && self.detail_octaves == detail_octaves(pitch_m)
+        self.seed == seed && self.count == count && self.detail_octaves == detail_octaves(pitch_m)
     }
 
-    pub(crate) fn shapes(&self) -> &[CratonShape] {
-        &self.shapes
+    pub(crate) fn n_masses(&self) -> usize {
+        self.masses.len()
+    }
+
+    /// Which landmass (if any) contains this world direction, and the radial
+    /// coordinate within its outline.
+    pub(crate) fn membership(&self, dir: Vec3) -> Option<(u16, f32)> {
+        for (i, (shape, frame)) in self.masses.iter().enumerate() {
+            if let Some(f) = shape.contains(*frame * dir) {
+                return Some((i as u16, f));
+            }
+        }
+        None
+    }
+
+    /// Target crustal thickness at a continental cell: the supercontinent is a
+    /// textured plateau with a rim taper, raised where a shield core sits;
+    /// microcontinents keep the classic dome profile.
+    pub(crate) fn target_thickness_m(&self, mass: u16, dir: Vec3, f: f32) -> f32 {
+        let (shape, frame) = &self.masses[mass as usize];
+        let q = *frame * dir;
+        if mass != 0 {
+            return shape.thickness_m(q, f);
+        }
+        let rim = ((f - RIM_START_F) / (1.0 - RIM_START_F)).clamp(0.0, 1.0);
+        let base = BELT_THICKNESS_M - (BELT_THICKNESS_M - RIM_THICKNESS_M) * rim * rim;
+        let t = shape.noise.fbm(
+            q * THICKNESS_FREQ + Vec3::new(31.2, -17.6, 9.4),
+            self.detail_octaves.min(6),
+            LACUNARITY,
+            GAIN,
+        );
+        let mut thickness = base * (1.0 + THICKNESS_TEXTURE * t);
+        for (core, cf) in &self.cores {
+            let qc = *cf * dir;
+            if let Some(fc) = core.contains(qc) {
+                thickness = thickness.max(core.thickness_m(qc, fc));
+            }
+        }
+        thickness
+    }
+
+    /// Core radii in placement order (spacing diagnostics / tests).
+    pub(crate) fn core_radii_m(&self) -> Vec<f64> {
+        self.cores.iter().map(|(s, _)| s.radius_m).collect()
     }
 }
 
-/// Next craton's mean radius from the shape stream. Both constructors draw it
-/// the same way so `radii_m` and `new` agree.
-fn next_radius_m(rng: &mut rand_pcg::Pcg64Mcg, count: usize) -> f64 {
-    cap_radius_m(
-        CONTINENTAL_TARGET_FRACTION / count.max(1) as f64
-            * rng.random_range(CRATON_AREA_SPREAD.0..CRATON_AREA_SPREAD.1),
-    )
+/// Uniform random unit vector from this stream.
+fn random_unit_dir(rng: &mut rand_pcg::Pcg64Mcg) -> Vec3 {
+    loop {
+        let v = Vec3::new(
+            rng.random_range(-1.0f32..1.0),
+            rng.random_range(-1.0f32..1.0),
+            rng.random_range(-1.0f32..1.0),
+        );
+        let l = v.length_squared();
+        if l > 1e-4 && l <= 1.0 {
+            return v / l.sqrt();
+        }
+    }
 }
 
 /// Octaves needed for outline detail down to ~2 cells, clamped to a sane band.
@@ -333,85 +463,75 @@ mod tests {
     const PITCH: f64 = 70_000.0;
 
     #[test]
-    fn radii_match_the_full_build() {
-        let set = CratonSet::new(42, 8, PITCH);
-        let radii = CratonSet::radii_m(42, 8);
-        let full: Vec<f64> = set.shapes().iter().map(|s| s.radius_m).collect();
-        assert_eq!(radii, full);
-    }
-
-    #[test]
-    fn shapes_are_deterministic() {
-        let a = CratonSet::new(42, 8, PITCH);
-        let b = CratonSet::new(42, 8, PITCH);
-        let q = Vec3::new(0.2, 0.1, 0.97).normalize();
-        for (x, y) in a.shapes().iter().zip(b.shapes()) {
-            assert_eq!(x.radius_m, y.radius_m);
-            assert_eq!(x.centroid_local, y.centroid_local);
-            assert_eq!(x.contains(q), y.contains(q));
+    fn genesis_is_deterministic() {
+        let a = Genesis::new(42, 8, PITCH);
+        let b = Genesis::new(42, 8, PITCH);
+        assert_eq!(a.n_masses(), b.n_masses());
+        assert_eq!(a.core_radii_m(), b.core_radii_m());
+        for i in 0..2_000 {
+            let t = i as f32 * 0.618_034;
+            let q = Vec3::new((t).sin(), (t * 0.73).cos(), (t * 1.31).sin()).normalize();
+            assert_eq!(a.membership(q), b.membership(q));
         }
     }
 
     #[test]
-    fn outline_is_irregular_but_bounded() {
-        let set = CratonSet::new(7, 6, PITCH);
-        for s in set.shapes() {
-            let mut min = f32::INFINITY;
-            let mut max: f32 = 0.0;
-            for i in 0..256 {
-                let phi = i as f32 / 256.0 * std::f32::consts::TAU;
-                // Walk out along one azimuth until we leave the shape.
-                let mut last = 0.0f32;
-                for j in 1..400 {
-                    let d = j as f32 * 0.002;
-                    let q = Vec3::new(d.sin() * phi.cos(), d.sin() * phi.sin(), d.cos());
-                    if s.contains(q).is_some() {
-                        last = d;
-                    }
-                }
-                min = min.min(last);
-                max = max.max(last);
-            }
-            let mean = s.radius_m as f32 / EARTH_RADIUS_M as f32;
-            println!("outline {min:.3}..{max:.3} about {mean:.3}");
-            assert!(
-                max > mean * 1.25 && min < mean * 0.85,
-                "outline too round: {min}..{max} about {mean}"
-            );
-            assert!(max < mean * 2.5, "outline runaway: {max} vs {mean}");
-        }
-    }
-
-    /// The stored centroid is what `phase1` aligns on every step, so the
-    /// quadrature has to have converged: an error there is a per-step placement
-    /// error, i.e. a craton that crawls sideways forever.
-    #[test]
-    fn centroid_quadrature_has_converged() {
-        let set = CratonSet::new(1337, 8, PITCH);
-        for s in set.shapes() {
-            // Independent, 8x denser quadrature with a different spiral phase.
-            let cos_cap = s.cos_bound();
-            let m = CENTROID_SAMPLES * 8;
-            let mut sum = Vec3::ZERO;
+    fn genesis_builds_one_dominant_landmass() {
+        for seed in [42u64, 7, 1337] {
+            let g = Genesis::new(seed, 12, PITCH);
+            assert!(g.n_masses() >= 1 && g.n_masses() <= 3, "{}", g.n_masses());
+            // Sample the sphere; the main mass must dominate the continental
+            // area and the total must be in the neighbourhood of the target.
+            let mut per_mass = vec![0usize; g.n_masses()];
+            let m = 60_000;
             for i in 0..m {
-                let u = (i as f32 + 0.31) / m as f32;
-                let cz = 1.0 - u * (1.0 - cos_cap);
-                let sr = (1.0 - cz * cz).max(0.0).sqrt();
-                let phi = i as f32 * GOLDEN_ANGLE + 0.7;
-                let q = Vec3::new(sr * phi.cos(), sr * phi.sin(), cz);
-                if s.contains(q).is_some() {
-                    sum += q;
+                let u = 1.0 - 2.0 * (i as f32 + 0.5) / m as f32;
+                let sr = (1.0 - u * u).max(0.0).sqrt();
+                let phi = i as f32 * GOLDEN_ANGLE;
+                let q = Vec3::new(sr * phi.cos(), sr * phi.sin(), u);
+                if let Some((mass, _)) = g.membership(q) {
+                    per_mass[mass as usize] += 1;
                 }
             }
-            let err = s.centroid_local.angle_between(sum.normalize());
-            // An error here is a constant per-step placement offset, i.e. an
-            // extra drift velocity of `err * EARTH_RADIUS / dt`. 2e-3 rad is
-            // 13 km per 1 Myr step against a craton drift of ~90 km: a few per
-            // cent of speed error, and — being constant in the craton frame —
-            // smooth motion, not the boundary flicker that leaves banding.
-            println!("centroid err {err:.5}");
-            assert!(err < 2e-3, "centroid off by {err} rad");
+            let total: usize = per_mass.iter().sum();
+            let frac = total as f64 / m as f64;
+            println!("seed {seed}: continental fraction {frac:.3}, per-mass {per_mass:?}");
+            assert!(
+                (0.25..=0.50).contains(&frac),
+                "seed {seed}: continental fraction {frac:.3} out of band"
+            );
+            assert!(
+                per_mass[0] as f64 >= total as f64 * 0.75,
+                "seed {seed}: supercontinent is not dominant: {per_mass:?}"
+            );
         }
+    }
+
+    #[test]
+    fn genesis_cores_thicken_the_interior() {
+        let g = Genesis::new(42, 10, PITCH);
+        // Thickness sampled inside the main mass must show real variation
+        // (shield cores over mobile belt) and stay inside crustal bounds.
+        let mut min = f32::INFINITY;
+        let mut max = 0.0f32;
+        let m = 40_000;
+        for i in 0..m {
+            let u = 1.0 - 2.0 * (i as f32 + 0.5) / m as f32;
+            let sr = (1.0 - u * u).max(0.0).sqrt();
+            let phi = i as f32 * GOLDEN_ANGLE;
+            let q = Vec3::new(sr * phi.cos(), sr * phi.sin(), u);
+            if let Some((0, f)) = g.membership(q) {
+                let t = g.target_thickness_m(0, q, f);
+                min = min.min(t);
+                max = max.max(t);
+            }
+        }
+        println!("interior thickness {min:.0}..{max:.0} m");
+        assert!(min > 20_000.0 && max < 50_000.0, "{min}..{max}");
+        assert!(
+            max - min > 6_000.0,
+            "interior is billiard-flat: {min}..{max}"
+        );
     }
 
     #[test]
