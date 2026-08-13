@@ -142,31 +142,65 @@ pub fn lapse_surface_m(elevation_m: f32, ice_thickness_m: f32, sea_level_m: f32)
 /// (before geology has solved a sea level) yields the saturated value
 /// everywhere.
 pub fn distance_to_ocean_cells(planet: &Planet, mesh: &Mesh) -> Vec<u8> {
+    // METRIC distance bucketed into reference-cell units (~112 km each, the
+    // level-6 Goldberg pitch all the continentality constants were calibrated
+    // on). A hop count would read a fine Voronoi coastal band as "deep
+    // continental interior" three cells in — one of the ways variable cell
+    // sizes silently break physics written for uniform meshes.
+    const REF_KM: f32 = 112.0;
     let n = planet.n_cells();
-    let max = MAX_OCEAN_DISTANCE_CELLS;
-    let mut dist = vec![max; n];
-    let mut queue: Vec<u32> = Vec::with_capacity(n / 4);
+    let max_km = MAX_OCEAN_DISTANCE_CELLS as f32 * REF_KM;
+    let mut dist_km = vec![f32::INFINITY; n];
+    // Dijkstra over metric edge lengths, seeded from every ocean cell. The
+    // key is the distance's IEEE bit pattern: monotone for non-negative
+    // floats, so integer ordering is distance ordering.
+    let mut heap: std::collections::BinaryHeap<(std::cmp::Reverse<u32>, u32)> =
+        std::collections::BinaryHeap::new();
+    fn key(km: f32) -> u32 {
+        km.max(0.0).to_bits()
+    }
     for c in 0..n as u32 {
         if planet.is_ocean(c) {
-            dist[c as usize] = 0;
-            queue.push(c);
+            dist_km[c as usize] = 0.0;
+            heap.push((std::cmp::Reverse(key(0.0)), c));
         }
     }
-    let mut head = 0usize;
-    while head < queue.len() {
-        let c = queue[head];
-        head += 1;
-        let nd = dist[c as usize] + 1;
+    while let Some((std::cmp::Reverse(k), c)) = heap.pop() {
+        let d = f32::from_bits(k);
+        if d > dist_km[c as usize] {
+            continue;
+        }
         for &m in mesh.neighbors_of(c) {
-            if dist[m as usize] > nd {
-                dist[m as usize] = nd;
-                if nd < max {
-                    queue.push(m);
-                }
+            let step = iw_mesh::great_circle_km(mesh.centers[c as usize], mesh.centers[m as usize]);
+            let nd = d + step;
+            if nd < dist_km[m as usize] && nd <= max_km {
+                dist_km[m as usize] = nd;
+                heap.push((std::cmp::Reverse(key(nd)), m));
             }
         }
     }
-    dist
+    (0..n)
+        .map(|i| {
+            let km = dist_km[i];
+            if km <= 0.0 {
+                return 0; // ocean itself
+            }
+            // Ocean-adjacent land is "coastal" whatever the cell pitch —
+            // flooring alone would skip bucket 1 entirely on coarse meshes.
+            let adjacent = mesh
+                .neighbors_of(i as u32)
+                .iter()
+                .any(|m| planet.is_ocean(*m));
+            if adjacent {
+                return 1;
+            }
+            if km.is_finite() {
+                ((km / REF_KM).floor() as u8).clamp(2, MAX_OCEAN_DISTANCE_CELLS)
+            } else {
+                MAX_OCEAN_DISTANCE_CELLS
+            }
+        })
+        .collect()
 }
 
 /// Seasonal amplitude for every cell, degrees C.

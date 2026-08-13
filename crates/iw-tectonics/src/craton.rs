@@ -97,7 +97,7 @@ const OUTLINE_SCALE_CAP_RAD: f32 = 0.30;
 /// nominal radius, the modulated radius being squared in the cap area) and to
 /// the every-step thickness profile: 0.37 still lands sea level within +-320 m
 /// and land at 24-25% on seeds 42/7/1337.
-pub(crate) const CONTINENTAL_TARGET_FRACTION: f64 = 0.37;
+pub(crate) const CONTINENTAL_TARGET_FRACTION: f64 = 0.44;
 /// Per-craton area spread about the mean, as a multiplier.
 const CRATON_AREA_SPREAD: (f64, f64) = (0.65, 1.35);
 

@@ -30,7 +30,7 @@ const COLLISION_VISC: f64 = 100.0;
 /// Converts driving torque density into angular velocity, rad*m/Myr.
 /// Calibrated so a plate with a normal share of subducting boundary settles
 /// around 4-6 cm/yr at `tectonic_vigor == 1`.
-const TORQUE_GAIN: f64 = 1.5e5;
+const TORQUE_GAIN: f64 = 1.4e5;
 /// Smallest plate area, as a fraction of the planet, that the drag term will
 /// use. Without it a microplate's perimeter-to-area ratio drives it straight
 /// into the speed cap; real microplates are dragged along by their neighbours.
@@ -126,6 +126,15 @@ const RIFT_WELD_IMMUNITY_MYR: f64 = 80.0;
 const RIFT_OPEN_IMMUNITY_M_YR: f64 = 0.005;
 /// Area fraction beyond which any plate rifts on size alone.
 const GIANT_PLATE_AREA_FRAC: f64 = 0.40;
+/// Resultant-length deficit vs an equal-area cap beyond which a plate's shape
+/// is mechanically untenable and it tears at a neck (horseshoes, crescents).
+/// Calibration: a fractal-margined but sound plate runs a deficit of
+/// 0.10-0.22, a true horseshoe 0.35+; tearing at 0.18 shredded the mosaic
+/// into a 22-plate soup whose collisions consumed half the continental area.
+const SHAPE_TEAR_DEFICIT: f64 = 0.32;
+/// Shape tearing only applies to plates at least this big — slivers are the
+/// absorb/subduct machinery's job, not the rift engine's.
+const SHAPE_TEAR_MIN_FRAC: f64 = 0.04;
 
 /// Basalt erupted over a plume, m/Myr at strength 1.
 const HOTSPOT_DEPOSIT_M_MYR: f32 = 40.0;
@@ -645,6 +654,44 @@ fn rift_step(
     }
     let vigor = planet.config.tectonic_vigor as f64;
     let min_riftable = MIN_RIFTABLE_CELLS.max(planet.n_cells() / 80);
+
+    // Shape instability: a plate whose mass is spread far from its centroid
+    // relative to a spherical cap of the same area (horseshoes, crescents,
+    // long arcs) is mechanically absurd — real lithosphere tears at the neck
+    // long before it deforms into a U. The resultant length |Σ area·center|/A
+    // is immune to fractal boundary length, unlike perimeter compactness.
+    let mut resultant = vec![DVec3::ZERO; np];
+    for c in 0..planet.n_cells() {
+        let p = planet.plate_id[c] as usize;
+        if p < np {
+            resultant[p] += mesh.centers[c].as_dvec3() * cache.area_m2[c];
+        }
+    }
+    let mut worst: Option<(u16, f64)> = None;
+    for p in 0..np {
+        let frac = (area[p] / cache.total_area_m2).clamp(0.0, 0.5);
+        if frac < SHAPE_TEAR_MIN_FRAC || (cell_count[p] as usize) < min_riftable * 2 {
+            continue;
+        }
+        let r_bar = resultant[p].length() / area[p];
+        // A cap covering `frac` of the sphere has resultant (1 + cos t)/2.
+        let r_cap = 1.0 - frac;
+        let deficit = r_cap - r_bar;
+        if deficit > SHAPE_TEAR_DEFICIT && worst.map(|(_, d)| deficit > d).unwrap_or(true) {
+            worst = Some((p as u16, deficit));
+        }
+    }
+    if let Some((p, deficit)) = worst {
+        // Deterministic forced tear, at most one per step.
+        if split_plate(planet, mesh, ctx, scratch, p, RiftMode::Neck) {
+            ctx.progress.event(ProgressEvent::Milestone(format!(
+                "plate {p} tore under its own shape (deficit {deficit:.2}) at {:.0} Myr",
+                planet.time_myr
+            )));
+            return true;
+        }
+    }
+
     let mut fired: Option<u16> = None;
     for p in 0..np {
         let frac = area[p] / cache.total_area_m2;
@@ -674,7 +721,18 @@ fn rift_step(
         }
     }
     let Some(p) = fired else { return false };
-    split_plate(planet, mesh, ctx, scratch, p)
+    split_plate(planet, mesh, ctx, scratch, p, RiftMode::Transect)
+}
+
+/// How a rift picks its nucleation site.
+#[derive(Clone, Copy, PartialEq)]
+enum RiftMode {
+    /// Cut THROUGH the plate's interior (continental breakup): nucleate deep
+    /// inland so the path transects the landmass instead of calving its rim.
+    Transect,
+    /// Sever a thin neck (shape instability): nucleate mid-arm, where the
+    /// plate is narrow, so the path exits through both nearby boundaries.
+    Neck,
 }
 
 /// Split plate `p` along a crooked rift path grown through its weakest crust.
@@ -689,6 +747,7 @@ fn split_plate(
     ctx: &mut StepCtx,
     scratch: &mut Scratch,
     p: u16,
+    mode: RiftMode,
 ) -> bool {
     let n = planet.n_cells();
     let members: Vec<u32> = (0..n as u32)
@@ -712,6 +771,47 @@ fn split_plate(
         suture + 0.8 * ridge + 0.4 * thin
     };
 
+    // Interior depth (hops) within the plate: distance from the plate's
+    // boundary for Neck mode, distance from the ocean for Transect mode.
+    // Both are what stops rifts from only ever nibbling at rims.
+    let mut depth: rustc_hash::FxHashMap<u32, u32> = rustc_hash::FxHashMap::default();
+    {
+        let mut frontier: Vec<u32> = Vec::new();
+        for &c in &members {
+            let is_seed = match mode {
+                RiftMode::Neck => mesh
+                    .neighbors_of(c)
+                    .iter()
+                    .any(|m| planet.plate_id[*m as usize] != p),
+                RiftMode::Transect => {
+                    mesh.neighbors_of(c)
+                        .iter()
+                        .any(|m| planet.crust_type[*m as usize] != CrustType::Continental)
+                        && planet.crust_type[c as usize] == CrustType::Continental
+                }
+            };
+            if is_seed {
+                depth.insert(c, 0);
+                frontier.push(c);
+            }
+        }
+        let mut d = 0u32;
+        while !frontier.is_empty() {
+            d += 1;
+            let mut next = Vec::new();
+            for &c in &frontier {
+                for &m in mesh.neighbors_of(c) {
+                    if planet.plate_id[m as usize] == p && !depth.contains_key(&m) {
+                        depth.insert(m, d);
+                        next.push(m);
+                    }
+                }
+            }
+            frontier = next;
+        }
+    }
+    let max_depth = depth.values().copied().max().unwrap_or(0).max(1) as f32;
+
     // Nucleate at the weakest cell (deterministic argmax, rng only for ties
     // via the jitter inside path growth). A mostly-continental plate rifts
     // THROUGH ITS CONTINENT — that is what breaks a Pangaea apart; nucleating
@@ -722,7 +822,7 @@ fn split_plate(
         .filter(|c| planet.crust_type[**c as usize] == CrustType::Continental)
         .count();
     let continental_rift = cont_cells * 3 >= members.len();
-    let candidates: Vec<u32> = if continental_rift {
+    let candidates: Vec<u32> = if continental_rift && mode == RiftMode::Transect {
         members
             .iter()
             .copied()
@@ -731,11 +831,28 @@ fn split_plate(
     } else {
         members.clone()
     };
+    let score = |c: u32, planet: &Planet| -> f32 {
+        let d = depth.get(&c).copied().unwrap_or(0) as f32 / max_depth;
+        match mode {
+            // Deep inland: the path then has to cross the whole landmass to
+            // reach its exits.
+            RiftMode::Transect => weakness(c, planet) + 2.0 * d,
+            // Mid-arm: shallow interior (thin neck) but never the rim itself.
+            RiftMode::Neck => {
+                let interior = if depth.get(&c).copied().unwrap_or(0) >= 2 {
+                    1.0
+                } else {
+                    -10.0
+                };
+                weakness(c, planet) + interior - 3.0 * d
+            }
+        }
+    };
     let seed = *candidates
         .iter()
         .max_by(|a, b| {
-            weakness(**a, planet)
-                .total_cmp(&weakness(**b, planet))
+            score(**a, planet)
+                .total_cmp(&score(**b, planet))
                 .then(b.cmp(a))
         })
         .expect("non-empty");
