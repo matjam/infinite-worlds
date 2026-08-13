@@ -111,7 +111,7 @@ const WELD_MIN_PITCHES: f64 = 2.0;
 /// Closure rate below which a collision is considered locked, m/yr. Welding
 /// waits for a truly stalled collision — eager welding freezes continents in
 /// place and kills visible drift; the braking term does the slowing first.
-const WELD_SPEED_M_YR: f64 = 0.008;
+const WELD_SPEED_M_YR: f64 = 0.005;
 /// A long boundary with almost no relative motion is not a boundary: the two
 /// plates are merged. This is what keeps the mosaic from fragmenting forever.
 /// Kept strict (long + truly dead) so merging can't collapse the mosaic into
@@ -120,7 +120,7 @@ const QUIET_MERGE_PITCHES: f64 = 12.0;
 const QUIET_MERGE_SPEED_M_YR: f64 = 0.002;
 /// Mean boundary age (younger oceanic side) below which a plate pair is
 /// weld-immune: it is an opening rift, not a dead boundary.
-const RIFT_WELD_IMMUNITY_MYR: f64 = 60.0;
+const RIFT_WELD_IMMUNITY_MYR: f64 = 80.0;
 /// Mean opening rate above which a pair is weld-immune (active divergence,
 /// even before the gap has any ocean floor).
 const RIFT_OPEN_IMMUNITY_M_YR: f64 = 0.005;
@@ -713,8 +713,25 @@ fn split_plate(
     };
 
     // Nucleate at the weakest cell (deterministic argmax, rng only for ties
-    // via the jitter inside path growth).
-    let seed = *members
+    // via the jitter inside path growth). A mostly-continental plate rifts
+    // THROUGH ITS CONTINENT — that is what breaks a Pangaea apart; nucleating
+    // in its oceanic fringe only calves sea floor and leaves the landmass
+    // whole.
+    let cont_cells = members
+        .iter()
+        .filter(|c| planet.crust_type[**c as usize] == CrustType::Continental)
+        .count();
+    let continental_rift = cont_cells * 3 >= members.len();
+    let candidates: Vec<u32> = if continental_rift {
+        members
+            .iter()
+            .copied()
+            .filter(|c| planet.crust_type[*c as usize] == CrustType::Continental)
+            .collect()
+    } else {
+        members.clone()
+    };
+    let seed = *candidates
         .iter()
         .max_by(|a, b| {
             weakness(**a, planet)

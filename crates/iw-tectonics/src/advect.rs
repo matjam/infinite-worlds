@@ -87,8 +87,78 @@ pub(crate) fn accumulate_and_remap(
         .collect();
     let inv: Vec<DQuat> = fwd.iter().map(|q| q.conjugate()).collect();
 
-    // -- Push pass: where does every source cell land?
+    // -- Pull pass. Push-based discovery assumed near-uniform cell sizes (one
+    // pushed claim per destination): on the terrain-sized Voronoi mesh a big
+    // cell's image covers hundreds of small cells, so instead every
+    // DESTINATION cell asks "which plates could reach me?" — the plates
+    // present in any chunk whose cone lies within the maximum pending
+    // displacement — and pull-tests each through its inverse rotation. Exact
+    // for any displacement and any cell-size contrast.
     let old_plate = &planet.plate_id;
+    let chunk_plates: Vec<SmallVec<[u16; 8]>> = mesh
+        .chunks
+        .iter()
+        .map(|ch| {
+            let mut set: SmallVec<[u16; 8]> = SmallVec::new();
+            for &c in &ch.cells {
+                let p = old_plate[c as usize];
+                if !set.contains(&p) {
+                    set.push(p);
+                }
+            }
+            set
+        })
+        .collect();
+    let max_disp_rad = planet
+        .plates
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| due[*i])
+        .map(|(_, p)| 2.0 * p.accum.w.abs().clamp(0.0, 1.0).acos())
+        .fold(0.0f64, f64::max) as f32;
+    // Reachability per chunk: cos(chunk_radius + max displacement).
+    let chunk_cos_reach: Vec<f32> = mesh
+        .chunks
+        .iter()
+        .map(|ch| {
+            (ch.cos_radius.clamp(-1.0, 1.0).acos() + max_disp_rad)
+                .min(std::f32::consts::PI)
+                .cos()
+        })
+        .collect();
+
+    let mut claims_per_cell: Vec<SmallVec<[Claim; 2]>> = (0..n)
+        .into_par_iter()
+        .map(|d| {
+            let dir = mesh.centers[d];
+            let mut cands: SmallVec<[u16; 6]> = SmallVec::new();
+            for (ci, ch) in mesh.chunks.iter().enumerate() {
+                if ch.center.dot(dir) >= chunk_cos_reach[ci] {
+                    for &p in &chunk_plates[ci] {
+                        if (p as usize) < np && !cands.contains(&p) {
+                            cands.push(p);
+                        }
+                    }
+                }
+            }
+            let ddir = dir.as_dvec3();
+            let mut claims: SmallVec<[Claim; 2]> = SmallVec::new();
+            for &p in &cands {
+                let src = mesh.cell_at((inv[p as usize] * ddir).as_vec3());
+                if old_plate[src as usize] == p {
+                    claims.push((p, src));
+                }
+            }
+            claims
+        })
+        .collect();
+
+    // -- Push supplement: pull alone loses a zero-claim boundary band to
+    // quantization jitter (a cell just outside the back-rotated outline claims
+    // nothing and turns to ridge crust). Pushing every source cell's content
+    // to its forward image guarantees it lands SOMEWHERE, restoring area
+    // conservation; duplicates against the pull claims are reconciled by the
+    // per-plate best-alignment dedupe in `resolve_overlap`.
     let dst_of: Vec<u32> = (0..n)
         .into_par_iter()
         .map(|c| {
@@ -100,17 +170,18 @@ pub(crate) fn accumulate_and_remap(
             }
         })
         .collect();
-
-    // -- Bucket claims by destination, in ascending source order (deterministic).
-    let mut claims: Vec<SmallVec<[Claim; 2]>> = vec![SmallVec::new(); n];
     for c in 0..n {
-        claims[dst_of[c] as usize].push((old_plate[c], c as u32));
+        let d = dst_of[c] as usize;
+        let claim = (old_plate[c], c as u32);
+        if !claims_per_cell[d].contains(&claim) {
+            claims_per_cell[d].push(claim);
+        }
     }
 
     // -- Resolve every destination cell.
     let decisions: Vec<Decision> = (0..n as u32)
         .into_par_iter()
-        .map(|d| resolve(d, planet, mesh, &claims, &inv, np))
+        .map(|d| resolve(d, planet, mesh, &claims_per_cell, &inv))
         .collect();
 
     // -- Materialize the new field set.
@@ -213,7 +284,6 @@ fn resolve(
     mesh: &Mesh,
     claims: &[SmallVec<[Claim; 2]>],
     inv: &[DQuat],
-    np: usize,
 ) -> Decision {
     let list = &claims[d as usize];
     match list.len() {
@@ -221,58 +291,13 @@ fn resolve(
             plate: list[0].0,
             src: list[0].1,
         },
-        0 => resolve_hole(d, planet, mesh, claims, inv, np),
-        _ => resolve_overlap(planet, mesh, d, inv, list),
-    }
-}
-
-/// No pushed claim: either a discretization hole inside a plate (pull-check
-/// the neighbourhood) or a genuine divergent gap (new ridge crust).
-fn resolve_hole(
-    d: u32,
-    planet: &Planet,
-    mesh: &Mesh,
-    claims: &[SmallVec<[Claim; 2]>],
-    inv: &[DQuat],
-    np: usize,
-) -> Decision {
-    // Candidate plates: owners of pushed claims on ring-1 and ring-2 cells.
-    let mut cands: SmallVec<[u16; 4]> = SmallVec::new();
-    let mut push_cand = |p: u16| {
-        if (p as usize) < np && !cands.contains(&p) {
-            cands.push(p);
-        }
-    };
-    for &nb in mesh.neighbors_of(d) {
-        for &(p, _) in &claims[nb as usize] {
-            push_cand(p);
-        }
-        for &nb2 in mesh.neighbors_of(nb) {
-            for &(p, _) in &claims[nb2 as usize] {
-                push_cand(p);
-            }
-        }
-    }
-    cands.sort_unstable();
-    let dir = mesh.centers[d as usize].as_dvec3();
-    let mut pulled: SmallVec<[Claim; 2]> = SmallVec::new();
-    for &p in &cands {
-        let src = mesh.cell_at((inv[p as usize] * dir).as_vec3());
-        if planet.plate_id[src as usize] == p {
-            pulled.push((p, src));
-        }
-    }
-    match pulled.len() {
         0 => Decision::Fresh {
-            // Trailing plate keeps the new ridge crust: the cell's previous
-            // owner is deterministic and physically sensible.
+            // A genuine divergence gap: no plate's crust reaches this cell.
+            // The trailing plate (the cell's previous owner) keeps the new
+            // ridge crust — deterministic and physically sensible.
             plate: planet.plate_id[d as usize],
         },
-        1 => Decision::Keep {
-            plate: pulled[0].0,
-            src: pulled[0].1,
-        },
-        _ => resolve_overlap(planet, mesh, d, inv, &pulled),
+        _ => resolve_overlap(planet, mesh, d, inv, list),
     }
 }
 
