@@ -10,7 +10,5 @@ iw-mesh.workspace = true
 glam.workspace = true
 rand.workspace = true
 rand_pcg.workspace = true
-rayon.workspace = true
 rustc-hash.workspace = true
 log.workspace = true
-smallvec.workspace = true
