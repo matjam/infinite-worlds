@@ -99,7 +99,7 @@ const SUPERPLATE_AREA_FRAC: f64 = 0.18;
 /// Continental area fraction that makes a big plate a rift candidate.
 const SUPERPLATE_CONT_FRAC: f64 = 0.22;
 /// Rift nucleation probability per Myr for an unstable superplate.
-const RIFT_PROB_SUPER_PER_MYR: f64 = 0.04;
+const RIFT_PROB_SUPER_PER_MYR: f64 = 0.05;
 /// Background rift nucleation probability per Myr for any other plate.
 const RIFT_PROB_BASE_PER_MYR: f64 = 0.0002;
 /// Opening speed handed to the two halves of a fresh rift, m/yr.
