@@ -129,6 +129,7 @@ pub(crate) fn enforce_contiguity(
                 target[k] = planet.plates.len() as u16;
                 planet.plates.push(Plate {
                     welded_to: None,
+                    accum: glam::DQuat::IDENTITY,
                     ..plate
                 });
             } else {

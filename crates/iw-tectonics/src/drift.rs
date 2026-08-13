@@ -8,8 +8,9 @@ use iw_mesh::{Mesh, EARTH_RADIUS_M};
 use rand::Rng;
 use rustc_hash::FxHashMap;
 
+use crate::advect;
 use crate::boundary::{self, Kind};
-use crate::crust::{deposit_new, destroy_column, make_fresh_oceanic};
+use crate::crust::{deposit_new, make_fresh_oceanic};
 use crate::geom::{omega_for_velocity, random_unit, reproject, tangent_toward};
 use crate::phase1;
 use crate::topology::{absorb_tiny_plates, compact_plates, enforce_contiguity};
@@ -25,11 +26,11 @@ const SLAB_PULL: f64 = 1.0;
 /// Ridge push per metre of spreading boundary, relative to slab pull.
 const RIDGE_PUSH: f64 = 0.22;
 /// Viscous braking per metre of collisional boundary, per (m/yr) of closure.
-const COLLISION_VISC: f64 = 22.0;
+const COLLISION_VISC: f64 = 100.0;
 /// Converts driving torque density into angular velocity, rad*m/Myr.
 /// Calibrated so a plate with a normal share of subducting boundary settles
 /// around 4-6 cm/yr at `tectonic_vigor == 1`.
-const TORQUE_GAIN: f64 = 1.1e5;
+const TORQUE_GAIN: f64 = 1.3e5;
 /// Smallest plate area, as a fraction of the planet, that the drag term will
 /// use. Without it a microplate's perimeter-to-area ratio drives it straight
 /// into the speed cap; real microplates are dragged along by their neighbours.
@@ -43,9 +44,6 @@ const MOTION_TAU_MYR: f64 = 12.0;
 const MANTLE_JITTER_RAD_MYR: f64 = 0.0016;
 /// Absolute plate speed ceiling, m/yr.
 const MAX_PLATE_SPEED_M_YR: f64 = 0.15;
-/// Floor for the per-step stability cap, m/yr, so the 2-10 cm/yr target range
-/// stays reachable at high subdivision levels where 0.7 cell pitch is small.
-const MIN_SPEED_CAP_M_YR: f64 = 0.12;
 
 // --- boundary effects ---
 
@@ -58,9 +56,13 @@ const ARC_THICKEN_M_MYR: f32 = 120.0;
 /// Ceiling on arc thickening for continental / oceanic overriding plates, m.
 const ARC_MAX_CONTINENTAL_M: f32 = 55_000.0;
 const ARC_MAX_OCEANIC_M: f32 = 26_000.0;
+/// Oceanic arc crust this thick has differentiated into juvenile continental
+/// crust (island-arc accretion). Slightly denser than craton basement.
+const ARC_MATURE_THICKNESS_M: f32 = 20_000.0;
+const ARC_MATURE_DENSITY_KG_M3: f32 = 2_800.0;
 /// Fraction of the crust-thickness deficit a trench cell closes per unit of
 /// (closure * dt / pitch).
-const TRENCH_FLEX_RATE: f32 = 1.5;
+const TRENCH_FLEX_RATE: f32 = 4.0;
 /// Fraction of shortening strain converted into crustal thickening.
 ///
 /// Calibration: thickening is proportional to the crust already there, so
@@ -71,8 +73,6 @@ const TRENCH_FLEX_RATE: f32 = 1.5;
 const COLLIDE_SHORTENING: f32 = 0.32;
 /// Fraction of extensional strain converted into crustal thinning.
 const RIFT_STRETCH: f32 = 0.07;
-/// Basalt veneer left on a freshly consumed trench cell, m.
-const TRENCH_VENEER_M: f32 = 300.0;
 /// Oceanic crust relaxes back toward its reference thickness with this time
 /// constant once it is no longer flexing into a trench, Myr.
 const OCEAN_RELAX_TAU_MYR: f32 = 25.0;
@@ -101,9 +101,9 @@ const RIFT_SEPARATION_M_YR: f32 = 0.03;
 /// Smallest fragment a rift may produce, in cells.
 const MIN_RIFT_FRAGMENT: usize = 6;
 /// Collisional boundary length, in cell pitches, needed before plates may weld.
-const WELD_MIN_PITCHES: f64 = 3.0;
+const WELD_MIN_PITCHES: f64 = 2.0;
 /// Closure rate below which a collision is considered locked, m/yr.
-const WELD_SPEED_M_YR: f64 = 0.010;
+const WELD_SPEED_M_YR: f64 = 0.020;
 /// A long boundary with almost no relative motion is not a boundary: the two
 /// plates are merged. This is what keeps the mosaic from fragmenting forever.
 const QUIET_MERGE_PITCHES: f64 = 8.0;
@@ -113,19 +113,6 @@ const QUIET_MERGE_SPEED_M_YR: f64 = 0.004;
 const HOTSPOT_DEPOSIT_M_MYR: f32 = 40.0;
 const HOTSPOT_MAX_OCEANIC_M: f32 = 25_000.0;
 const HOTSPOT_MAX_CONTINENTAL_M: f32 = 50_000.0;
-
-/// A cell reassignment queued by the classification pass and resolved against
-/// `ctx.rng` afterwards. See the crate docs for why this is stateless.
-enum Transfer {
-    /// Renew the older of two cells straddling a spreading centre.
-    Spread { a: u32, b: u32, rate_m_yr: f32 },
-    /// Consume `s` and hand the trench floor to the overriding plate.
-    Subduct {
-        s: u32,
-        ovr_plate: u16,
-        rate_m_yr: f32,
-    },
-}
 
 /// Length-weighted kinematics of the whole boundary between one plate pair.
 #[derive(Default, Clone, Copy)]
@@ -162,6 +149,10 @@ pub(crate) fn step(
     let frozen = planet.phase == Phase::RecentPast;
     let pitch = cache.pitch_m;
 
+    // Drift v2: move the crust itself, then let boundary physics act on the
+    // moved geometry (docs/drift-v2.md).
+    let mut topology_dirty = advect::accumulate_and_remap(planet, mesh, cache, dt_myr, ctx.ledger);
+
     let edges = boundary::build_edges(planet, mesh);
 
     let mut area = vec![0f64; np];
@@ -183,7 +174,6 @@ pub(crate) fn step(
     scratch.f32a.fill(0.0); // arc lava, metres
     scratch.f32b.fill(0.0); // crustal thickening, metres
     scratch.flags.fill(false); // cells already reassigned this step
-    let mut transfers: Vec<Transfer> = Vec::new();
     let mut pairs: FxHashMap<(u16, u16), PairAcc> = FxHashMap::default();
 
     for e in &edges {
@@ -219,11 +209,35 @@ pub(crate) fn step(
                             (th - th * strain * RIFT_STRETCH).max(1_000.0);
                     }
                 }
-                transfers.push(Transfer::Spread {
-                    a: e.a,
-                    b: e.b,
-                    rate_m_yr: open,
-                });
+                // Sub-cell spreading between remaps: the ridge keeps erupting
+                // even while accumulated displacement is below one pitch, so
+                // spreading centres always carry age-0 basalt. The advect
+                // remap then carries this young floor away.
+                if planet.crust_type[e.a as usize] == CrustType::Oceanic
+                    && planet.crust_type[e.b as usize] == CrustType::Oceanic
+                {
+                    let p_renew = (open as f64 * dt_myr * 1.0e6 / pitch).clamp(0.0, 1.0);
+                    if ctx.rng.random::<f64>() < p_renew {
+                        let renew = if planet.crust_age_myr[e.a as usize]
+                            >= planet.crust_age_myr[e.b as usize]
+                        {
+                            e.a
+                        } else {
+                            e.b
+                        };
+                        if !scratch.flags[renew as usize] {
+                            scratch.flags[renew as usize] = true;
+                            make_fresh_oceanic(
+                                planet,
+                                renew,
+                                cache.ocean_thickness_m[renew as usize],
+                                cache.area_m2[renew as usize],
+                                ctx.ledger,
+                            );
+                            planet.tectonic_flags[renew as usize] |= cell_flags::RIFT;
+                        }
+                    }
+                }
             }
             Kind::Convergent => {
                 let conv = e.conv_m_yr;
@@ -285,73 +299,11 @@ pub(crate) fn step(
                         scratch,
                     );
 
-                    transfers.push(Transfer::Subduct {
-                        s,
-                        ovr_plate,
-                        rate_m_yr: conv,
-                    });
+                    // Consumption of the subducting cell happens in the advect
+                    // remap when the overriding plate's crust arrives; here we
+                    // only apply the continuous effects (flexure, arc, pull).
+                    let _ = ovr_plate;
                 }
-            }
-        }
-    }
-
-    // Discrete reassignment: probability = displacement / cell pitch.
-    let mut topology_dirty = false;
-    for t in &transfers {
-        let rate = match t {
-            Transfer::Spread { rate_m_yr, .. } | Transfer::Subduct { rate_m_yr, .. } => *rate_m_yr,
-        };
-        let p = (rate as f64 * dt_myr * 1.0e6 / pitch).clamp(0.0, 1.0);
-        let draw: f64 = ctx.rng.random();
-        if draw >= p {
-            continue;
-        }
-        match *t {
-            Transfer::Spread { a, b, .. } => {
-                if planet.crust_type[a as usize] != CrustType::Oceanic
-                    || planet.crust_type[b as usize] != CrustType::Oceanic
-                {
-                    continue;
-                }
-                let renew = if planet.crust_age_myr[a as usize] >= planet.crust_age_myr[b as usize]
-                {
-                    a
-                } else {
-                    b
-                };
-                if scratch.flags[renew as usize] {
-                    continue;
-                }
-                scratch.flags[renew as usize] = true;
-                make_fresh_oceanic(
-                    planet,
-                    renew,
-                    cache.ocean_thickness_m[renew as usize],
-                    cache.area_m2[renew as usize],
-                    ctx.ledger,
-                );
-                planet.tectonic_flags[renew as usize] |= cell_flags::RIFT;
-            }
-            Transfer::Subduct { s, ovr_plate, .. } => {
-                if scratch.flags[s as usize] {
-                    continue;
-                }
-                scratch.flags[s as usize] = true;
-                let area = cache.area_m2[s as usize];
-                destroy_column(planet, s, area, ctx.ledger);
-                planet.plate_id[s as usize] = ovr_plate;
-                planet.crust_type[s as usize] = CrustType::Oceanic;
-                planet.crust_thickness_m[s as usize] = TRENCH_THICKNESS_M;
-                planet.tectonic_flags[s as usize] |= cell_flags::SUBDUCTING;
-                deposit_new(
-                    planet,
-                    s,
-                    RockType::Basalt,
-                    TRENCH_VENEER_M,
-                    area,
-                    ctx.ledger,
-                );
-                topology_dirty = true;
             }
         }
     }
@@ -387,6 +339,18 @@ pub(crate) fn step(
             };
             planet.crust_thickness_m[c as usize] =
                 (planet.crust_thickness_m[c as usize] + grow).min(cap);
+            // Arc maturation: sustained arc magmatism turns thick oceanic arc
+            // crust into juvenile continental crust (island-arc accretion) —
+            // the source term that balances the continental area consumed by
+            // collisions, as on Earth.
+            if planet.crust_type[c as usize] == CrustType::Oceanic
+                && planet.tectonic_flags[c as usize] & cell_flags::ARC != 0
+                && planet.crust_thickness_m[c as usize] >= ARC_MATURE_THICKNESS_M
+            {
+                planet.crust_type[c as usize] = CrustType::Continental;
+                planet.crust_density_kg_m3[c as usize] = ARC_MATURE_DENSITY_KG_M3;
+                planet.crust_age_myr[c as usize] = 0.0;
+            }
         }
     }
 
@@ -588,12 +552,11 @@ fn update_motion(
     total_area_m2: f64,
     ctx: &mut StepCtx,
 ) {
-    // Stability: a boundary may migrate at most ~0.7 cells per step. At high
-    // subdivision that cap would fall below the target speed range, so it is
-    // floored -- boundary migration then saturates at one cell per step while
-    // the plate velocity field stays physical.
-    let v_cap = (0.7 * pitch_m / (dt_myr * 1.0e6)).clamp(MIN_SPEED_CAP_M_YR, MAX_PLATE_SPEED_M_YR);
-    let w_cap = v_cap * 1.0e6 / EARTH_RADIUS_M;
+    // Drift v2: the advection remap handles any per-step displacement, so the
+    // only cap is the physical plate-speed ceiling — no per-pitch stability
+    // floor, no migration saturation at high subdivision.
+    let _ = pitch_m;
+    let w_cap = MAX_PLATE_SPEED_M_YR * 1.0e6 / EARTH_RADIUS_M;
     let blend = 1.0 - (-dt_myr / MOTION_TAU_MYR).exp();
 
     for p in 0..planet.plates.len() {
@@ -668,7 +631,12 @@ fn rift_step(
     split_plate(planet, mesh, ctx, scratch, p)
 }
 
-/// Cut plate `p` with a great circle through one of its weak points.
+/// Split plate `p` along a crooked rift path grown through its weakest crust.
+///
+/// The path follows a weakness field (ancient sutures, ridged noise creases,
+/// thin crust) with directional persistence — the East-African-Rift look —
+/// instead of a great circle. Drift v2's advection then genuinely separates
+/// the halves and floors the widening gap with ridge crust.
 fn split_plate(
     planet: &mut Planet,
     mesh: &Mesh,
@@ -683,48 +651,90 @@ fn split_plate(
     if members.len() < MIN_RIFTABLE_CELLS.max(n / 80) {
         return false;
     }
-    // Prefer an ancient suture; otherwise the thinnest crust in the plate.
-    let sutures: Vec<u32> = members
-        .iter()
-        .copied()
-        .filter(|c| planet.tectonic_flags[*c as usize] & cell_flags::SUTURE != 0)
-        .collect();
-    let seed = if !sutures.is_empty() {
-        sutures[ctx.rng.random_range(0..sutures.len())]
-    } else {
-        *members
-            .iter()
-            .min_by(|a, b| {
-                planet.crust_thickness_m[**a as usize]
-                    .total_cmp(&planet.crust_thickness_m[**b as usize])
-            })
-            .expect("non-empty")
+
+    // Weakness field: suture bonus + ridged-noise creases + crustal thinness.
+    let crease = iw_core::noise::Noise3::new(planet.config.seed ^ 0x52_49_46_54); // "RIFT"
+    let weakness = |c: u32, planet: &Planet| -> f32 {
+        let ci = c as usize;
+        let suture = if planet.tectonic_flags[ci] & cell_flags::SUTURE != 0 {
+            1.0
+        } else {
+            0.0
+        };
+        let ridge = crease.ridged(mesh.centers[ci] * 3.0, 4, 2.0, 0.5);
+        let thin = (1.0 - planet.crust_thickness_m[ci] / 45_000.0).clamp(0.0, 1.0);
+        suture + 0.8 * ridge + 0.4 * thin
     };
-    let sc = mesh.centers[seed as usize];
-    let axis = tangent_toward(sc, random_unit(&mut ctx.rng));
-    // Cut plane: contains `sc` and `axis`; its normal is perpendicular to both.
-    let cut = sc.cross(axis).normalize_or_zero();
-    if cut.length_squared() < 0.5 {
+
+    // Nucleate at the weakest cell (deterministic argmax, rng only for ties
+    // via the jitter inside path growth).
+    let seed = *members
+        .iter()
+        .max_by(|a, b| {
+            weakness(**a, planet)
+                .total_cmp(&weakness(**b, planet))
+                .then(b.cmp(a))
+        })
+        .expect("non-empty");
+
+    // Grow the path from the seed in two opposite directions.
+    scratch.u32b.fill(u32::MAX); // u32::MAX = untouched; 0 = path member
+    let mut path: Vec<u32> = vec![seed];
+    scratch.u32b[seed as usize] = 0;
+    let init_dir = tangent_toward(mesh.centers[seed as usize], random_unit(&mut ctx.rng));
+    for leg_sign in [1.0f32, -1.0] {
+        let mut cur = seed;
+        let mut dir = init_dir * leg_sign;
+        loop {
+            let mut best: Option<(f32, u32)> = None;
+            for &m in mesh.neighbors_of(cur) {
+                if planet.plate_id[m as usize] != p {
+                    // Reached the plate edge: this leg is complete.
+                    best = None;
+                    break;
+                }
+                if scratch.u32b[m as usize] == 0 {
+                    continue;
+                }
+                let step = reproject(
+                    mesh.centers[m as usize] - mesh.centers[cur as usize],
+                    mesh.centers[cur as usize],
+                )
+                .normalize_or_zero();
+                let persist = step.dot(dir);
+                if persist < -0.2 {
+                    continue; // no hairpins
+                }
+                let jitter: f32 = ctx.rng.random_range(0.0..0.10);
+                let score = weakness(m, planet) + 0.9 * persist + jitter;
+                if best.map(|(s, _)| score > s).unwrap_or(true) {
+                    best = Some((score, m));
+                }
+            }
+            let Some((_, next)) = best else { break };
+            let step = reproject(
+                mesh.centers[next as usize] - mesh.centers[cur as usize],
+                mesh.centers[next as usize],
+            )
+            .normalize_or_zero();
+            dir = (0.6 * dir + 0.4 * step).normalize_or_zero();
+            scratch.u32b[next as usize] = 0;
+            path.push(next);
+            cur = next;
+            if path.len() > members.len() {
+                break; // safety, unreachable in practice
+            }
+        }
+    }
+    if path.len() < 3 {
         return false;
     }
 
-    // Largest connected component of the plate on the negative side.
-    let negative: Vec<u32> = members
-        .iter()
-        .copied()
-        .filter(|c| mesh.centers[*c as usize].dot(cut) < 0.0)
-        .collect();
-    if negative.len() < MIN_RIFT_FRAGMENT || members.len() - negative.len() < MIN_RIFT_FRAGMENT {
-        return false;
-    }
-    scratch.u32b.fill(u32::MAX);
-    let mut comp_id = 0u32;
-    let mut best: (u32, usize) = (u32::MAX, 0);
+    // Components of the plate minus the path; the path must sever it.
+    let mut comp_id = 1u32; // 0 is the path marker
+    let mut sizes: Vec<(u32, usize)> = Vec::new();
     let mut stack: Vec<u32> = Vec::new();
-    let in_neg = |c: u32, planet: &Planet, mesh: &Mesh| -> bool {
-        planet.plate_id[c as usize] == p && mesh.centers[c as usize].dot(cut) < 0.0
-    };
-    for &c in &negative {
+    for &c in &members {
         if scratch.u32b[c as usize] != u32::MAX {
             continue;
         }
@@ -736,25 +746,42 @@ fn split_plate(
         while let Some(x) = stack.pop() {
             size += 1;
             for &m in mesh.neighbors_of(x) {
-                if scratch.u32b[m as usize] == u32::MAX && in_neg(m, planet, mesh) {
+                if scratch.u32b[m as usize] == u32::MAX && planet.plate_id[m as usize] == p {
                     scratch.u32b[m as usize] = id;
                     stack.push(m);
                 }
             }
         }
-        if size > best.1 {
-            best = (id, size);
-        }
+        sizes.push((id, size));
     }
-    if best.1 < MIN_RIFT_FRAGMENT || members.len() - best.1 < MIN_RIFT_FRAGMENT {
-        return false;
+    sizes.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    if sizes.len() < 2 || sizes[1].1 < MIN_RIFT_FRAGMENT {
+        return false; // path failed to sever anything worth calving
     }
+    let new_comp = sizes[1].0;
 
+    // The second-largest component becomes the new plate; every other
+    // component (including the path cells, resolved by neighbor majority)
+    // stays with the old plate.
     let new_id = planet.plates.len() as u16;
     let mut new_sum = DVec3::ZERO;
     let mut old_sum = DVec3::ZERO;
     for &c in &members {
-        if scratch.u32b[c as usize] == best.0 {
+        let comp = scratch.u32b[c as usize];
+        let to_new = if comp == 0 {
+            let mut votes = 0i32;
+            for &m in mesh.neighbors_of(c) {
+                match scratch.u32b[m as usize] {
+                    x if x == new_comp => votes += 1,
+                    0 | u32::MAX => {}
+                    _ => votes -= 1,
+                }
+            }
+            votes > 0
+        } else {
+            comp == new_comp
+        };
+        if to_new {
             planet.plate_id[c as usize] = new_id;
             new_sum += mesh.centers[c as usize].as_dvec3();
         } else {
@@ -763,13 +790,16 @@ fn split_plate(
     }
     let r_new = new_sum.normalize_or(DVec3::Z).as_vec3();
     let r_old = old_sum.normalize_or(DVec3::Z).as_vec3();
+    // Push the halves apart along the line between their centroids.
+    let sep = reproject(r_new - r_old, r_new).normalize_or_zero();
     let w_old = planet.plates[p as usize].euler_pole * planet.plates[p as usize].omega_rad_myr;
-    let push_new = omega_for_velocity(r_new, reproject(-cut, r_new) * RIFT_SEPARATION_M_YR);
-    let push_old = omega_for_velocity(r_old, reproject(cut, r_old) * RIFT_SEPARATION_M_YR);
+    let push_new = omega_for_velocity(r_new, sep * RIFT_SEPARATION_M_YR);
+    let push_old = omega_for_velocity(r_old, reproject(-sep, r_old) * RIFT_SEPARATION_M_YR);
     let base = planet.plates[p as usize].clone();
     set_omega(&mut planet.plates[p as usize], w_old + push_old);
     let mut fresh = Plate {
         welded_to: None,
+        accum: glam::DQuat::IDENTITY,
         ..base
     };
     set_omega(&mut fresh, w_old + push_new);

@@ -85,6 +85,7 @@ mod tests {
             euler_pole: w.normalize(),
             omega_rad_myr: w.length(),
             welded_to: None,
+            accum: glam::DQuat::IDENTITY,
         };
         let back = plate.velocity_m_yr(r);
         assert!((back - v).length() < 1e-6, "{back:?} vs {v:?}");

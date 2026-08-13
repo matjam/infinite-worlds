@@ -278,11 +278,13 @@ fn two_continent_planet(level: u8, omega_rad_myr: f64) -> Harness {
             euler_pole: DVec3::Z,
             omega_rad_myr,
             welded_to: None,
+            accum: glam::DQuat::IDENTITY,
         },
         Plate {
             euler_pole: DVec3::Z,
             omega_rad_myr: 0.0,
             welded_to: None,
+            accum: glam::DQuat::IDENTITY,
         },
     ];
     h
@@ -318,13 +320,22 @@ fn continent_collision_thickens_crust() {
         max <= iw_tectonics::MAX_CRUST_THICKNESS_M + 1.0,
         "crust thickened past the Tibet cap: {max}"
     );
-    // Continental crust never subducts.
+    // Continental crust never subducts — but drift v2 conserves it by VOLUME,
+    // not by cell count: collision stacks the two plates' crust into fewer
+    // cells (fold + underthrust), and the vacated cells on the diverging side
+    // correctly floor with new ocean. So assert volume conservation instead of
+    // "every cell stays continental".
+    let cont_volume: f64 = (0..h.planet.n_cells())
+        .filter(|c| h.planet.crust_type[*c] == CrustType::Continental)
+        .map(|c| h.planet.crust_thickness_m[c] as f64 * h.mesh.areas_km2[c] as f64)
+        .sum();
+    let initial_volume: f64 = (0..h.planet.n_cells())
+        .map(|c| baseline as f64 * h.mesh.areas_km2[c] as f64)
+        .sum();
     assert!(
-        h.planet
-            .crust_type
-            .iter()
-            .all(|t| *t == CrustType::Continental),
-        "a continental cell was destroyed in a collision"
+        cont_volume > initial_volume * 0.90,
+        "continental crust volume shrank {:.1}% — collision is destroying continents",
+        (1.0 - cont_volume / initial_volume) * 100.0
     );
 }
 

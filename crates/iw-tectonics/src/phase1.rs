@@ -173,6 +173,7 @@ fn seed_planet(
             euler_pole: pole.normalize(),
             omega_rad_myr: omega,
             welded_to: None,
+            accum: glam::DQuat::IDENTITY,
         });
     }
     log::debug!(
@@ -646,6 +647,7 @@ pub(crate) fn partition_into_plates(
             euler_pole: if omega > 1e-12 { w / omega } else { DVec3::Z },
             omega_rad_myr: omega,
             welded_to: None,
+            accum: glam::DQuat::IDENTITY,
         });
     }
     for &s in &extra_seeds {
@@ -660,6 +662,7 @@ pub(crate) fn partition_into_plates(
             euler_pole: if omega > 1e-12 { w / omega } else { DVec3::Z },
             omega_rad_myr: omega,
             welded_to: None,
+            accum: glam::DQuat::IDENTITY,
         });
     }
 

@@ -277,6 +277,32 @@ impl StrataColumns {
         self.cols[cell as usize].clear();
         t
     }
+
+    /// Replace `cell`'s column with a copy of `source_cell`'s column from
+    /// another `StrataColumns`. Transport, not creation/destruction: callers
+    /// account for the ledger themselves (the drift-v2 remap moves columns
+    /// wholesale and charges nothing for pure moves).
+    pub fn copy_col_from(&mut self, cell: u32, source: &StrataColumns, source_cell: u32) {
+        let dst = &mut self.cols[cell as usize];
+        dst.clear();
+        dst.extend_from_slice(source.col(source_cell));
+    }
+
+    /// Underthrust `source_cell`'s strata beneath `cell`'s existing column
+    /// (continental collision: the losing plate's record slides under the
+    /// winner's, Himalaya-style). Transport, not destruction — no ledger
+    /// charge; the cap is enforced by merging.
+    pub fn prepend_col_from(&mut self, cell: u32, source: &StrataColumns, source_cell: u32) {
+        let src = source.col(source_cell);
+        if src.is_empty() {
+            return;
+        }
+        let dst = &mut self.cols[cell as usize];
+        dst.insert_from_slice(0, src);
+        while dst.len() > MAX_STRATA {
+            merge_thinnest_adjacent(dst);
+        }
+    }
 }
 
 fn merge_thinnest_adjacent(col: &mut Column) {

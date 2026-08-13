@@ -12,4 +12,5 @@ rand.workspace = true
 rand_pcg.workspace = true
 rustc-hash.workspace = true
 rayon.workspace = true
+smallvec.workspace = true
 log.workspace = true

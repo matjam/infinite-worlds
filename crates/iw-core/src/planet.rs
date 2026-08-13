@@ -1,4 +1,4 @@
-use glam::{DVec3, Vec3};
+use glam::{DQuat, DVec3, Vec3};
 use serde::{Deserialize, Serialize};
 
 use crate::{Biome, Phase, PlanetConfig, StrataColumns};
@@ -20,6 +20,11 @@ pub struct Plate {
     /// True once a continent-continent collision has welded this plate to
     /// another; welded plates share motion until rifting separates them.
     pub welded_to: Option<u16>,
+    /// Rotation accumulated since this plate's fields last advected (drift v2).
+    /// Composed every step; consumed (reset to identity) by the remap pass once
+    /// the implied surface displacement reaches a cell pitch. Serialized so
+    /// checkpoint resume reproduces the remap schedule exactly.
+    pub accum: DQuat,
 }
 
 impl Plate {
@@ -29,6 +34,21 @@ impl Plate {
         let v = w.cross(r.as_dvec3()); // (rad/Myr) * unit
                                        // radians/Myr at Earth radius -> meters/year
         (v * iw_mesh::EARTH_RADIUS_M / 1.0e6).as_vec3()
+    }
+
+    /// Fold this step's rotation into the pending advection rotation.
+    pub fn accumulate(&mut self, dt_myr: f64) {
+        let angle = self.omega_rad_myr * dt_myr;
+        if angle.abs() > 0.0 {
+            self.accum = (DQuat::from_axis_angle(self.euler_pole, angle) * self.accum).normalize();
+        }
+    }
+
+    /// Surface displacement (meters) at the sphere's "equator" of the pending
+    /// rotation — the upper bound over the plate's cells.
+    pub fn pending_displacement_m(&self) -> f64 {
+        // Rotation angle of a unit quaternion is 2*acos(|w|), in [0, pi].
+        2.0 * self.accum.w.abs().clamp(0.0, 1.0).acos() * iw_mesh::EARTH_RADIUS_M
     }
 }
 

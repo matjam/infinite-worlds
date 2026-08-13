@@ -59,6 +59,7 @@ use iw_core::{Phase, Planet, Process, StepCtx};
 use iw_mesh::Mesh;
 use rayon::prelude::*;
 
+mod advect;
 mod boundary;
 mod craton;
 mod crust;
@@ -110,7 +111,7 @@ pub const MAX_CRUST_THICKNESS_M: f32 = 70_000.0;
 /// oceanic, metres.
 pub const RIFT_BREAKUP_THICKNESS_M: f32 = 20_000.0;
 /// Crust thickness of an actively flexing trench cell, metres.
-pub const TRENCH_THICKNESS_M: f32 = 5_000.0;
+pub const TRENCH_THICKNESS_M: f32 = 4_200.0;
 
 /// Number of cells a plate must have before it may be rifted apart.
 pub const MIN_RIFTABLE_CELLS: usize = 24;

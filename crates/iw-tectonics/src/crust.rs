@@ -13,9 +13,9 @@ use iw_core::{CrustType, MassLedger, Planet, RockType};
 use crate::{CONTINENTAL_DENSITY_KG_M3, OCEANIC_DENSITY_KG_M3};
 
 /// Gabbro fraction of a fresh oceanic column (lower crust), metres.
-const OCEAN_GABBRO_M: f32 = 5_000.0;
+pub(crate) const OCEAN_GABBRO_M: f32 = 5_000.0;
 /// Basalt fraction of a fresh oceanic column (pillow lavas / sheeted dykes).
-const OCEAN_BASALT_M: f32 = 2_000.0;
+pub(crate) const OCEAN_BASALT_M: f32 = 2_000.0;
 /// Gneissic basement of a craton column, metres.
 const CRATON_GNEISS_M: f32 = 4_000.0;
 /// Granitic upper basement of a craton column, metres.
