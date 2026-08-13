@@ -458,6 +458,7 @@ mod tests {
                 precip_mm_yr: vec![0.0; n],
                 ice_thickness_m: vec![0.0; n],
                 water_flux_m3_yr: vec![0.0; n],
+                flow_to: vec![u32::MAX; n],
                 lake_depth_m: vec![0.0; n],
                 top_rock: vec![None; n],
                 plate_velocity_m_yr: vec![Vec3::ZERO; n],

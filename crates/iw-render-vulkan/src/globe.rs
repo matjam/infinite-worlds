@@ -180,6 +180,24 @@ struct CloudPush {
     misc: [f32; 4],
 }
 
+/// One vertex of a river ribbon (CPU-built quads following `flow_to`).
+/// Elevation rides in the vertex so the ribbon hugs the displaced terrain
+/// under any exaggeration without cell lookups.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct RiverVertex {
+    /// Unit sphere direction.
+    pub pos: [f32; 3],
+    /// Terrain elevation at this point, metres (pre-exaggeration).
+    pub elevation_m: f32,
+    /// Premultiplied-nothing RGBA; alpha carries the flux fade.
+    pub color: [f32; 4],
+}
+
+/// Radial lift of the river ribbons above the terrain, metres
+/// (pre-exaggeration, so it scales with the terrain and never z-fights).
+const RIVER_LIFT_M: f32 = 30.0;
+
 /// A chunk's draw range and bounding cone.
 struct ChunkDraw {
     first_index: u32,
@@ -280,6 +298,10 @@ pub struct GlobeRenderer {
     halo_pipeline: vk::Pipeline,
     cloud_layout: vk::PipelineLayout,
     cloud_pipeline: vk::Pipeline,
+    river_pipeline: vk::Pipeline,
+    river_vertices: Option<Buffer>,
+    river_count: u32,
+    river_capacity: u64,
     pub stats: DrawStats,
 }
 
@@ -296,6 +318,8 @@ const STAR_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/star.vert.spv
 const STAR_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/star.frag.spv"));
 const CLOUD_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cloud.vert.spv"));
 const CLOUD_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/cloud.frag.spv"));
+const RIVER_VERT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/river.vert.spv"));
+const RIVER_FRAG: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/river.frag.spv"));
 
 impl GlobeRenderer {
     /// Create the pipelines and descriptor objects. Geometry arrives later via
@@ -389,6 +413,7 @@ impl GlobeRenderer {
         let star_pipeline = create_star_pipeline(gpu, render_pass, star_layout, false)?;
         let halo_pipeline = create_star_pipeline(gpu, render_pass, star_layout, true)?;
         let cloud_pipeline = create_cloud_pipeline(gpu, render_pass, cloud_layout)?;
+        let river_pipeline = create_river_pipeline(gpu, render_pass, pipeline_layout)?;
 
         // The cloud shell never changes; only its coverage does.
         let (shell_dirs, shell_indices_cpu) = icosphere(CLOUD_SHELL_LEVEL);
@@ -454,6 +479,10 @@ impl GlobeRenderer {
             halo_pipeline,
             cloud_layout,
             cloud_pipeline,
+            river_pipeline,
+            river_vertices: None,
+            river_count: 0,
+            river_capacity: 0,
             stats: DrawStats::default(),
         })
     }
@@ -913,6 +942,82 @@ impl GlobeRenderer {
     ///
     /// Globe view only — a cloud deck drawn on a Mercator map would be a lie
     /// about where the weather is, and the shell has no projection anyway.
+    /// Replace the river ribbon geometry. Call when a new sim view arrives —
+    /// the buffer is host-visible and rewritten in place unless it must grow
+    /// (growth stalls the device, which is fine at view-update cadence).
+    pub fn set_rivers(&mut self, gpu: &Gpu, verts: &[RiverVertex]) -> Result<()> {
+        self.river_count = verts.len() as u32;
+        if verts.is_empty() {
+            return Ok(());
+        }
+        let bytes = std::mem::size_of_val(verts) as u64;
+        if bytes > self.river_capacity {
+            unsafe { gpu.device.device_wait_idle() }?;
+            if let Some(mut b) = self.river_vertices.take() {
+                b.destroy(&gpu.device, &mut gpu.alloc());
+            }
+            let cap = bytes.next_power_of_two();
+            self.river_vertices = Some(Buffer::new(
+                gpu,
+                cap,
+                vk::BufferUsageFlags::VERTEX_BUFFER,
+                MemoryLocation::CpuToGpu,
+                "river ribbons",
+            )?);
+            self.river_capacity = cap;
+        }
+        self.river_vertices
+            .as_mut()
+            .expect("river buffer sized above")
+            .write(verts)
+    }
+
+    /// Draw the river ribbons over the globe surface (globe mode only).
+    pub fn record_rivers(&self, gpu: &Gpu, cb: vk::CommandBuffer, params: &GlobeParams) {
+        if params.mode != ViewMode::Globe || self.river_count == 0 {
+            return;
+        }
+        let Some(vertices) = &self.river_vertices else {
+            return;
+        };
+        let push = GlobePush {
+            view_proj: params.view_proj.to_cols_array(),
+            cam_pos_exag: [
+                params.camera_pos_km.x,
+                params.camera_pos_km.y,
+                params.camera_pos_km.z,
+                params.exaggeration,
+            ],
+            params: [
+                params.radius_km,
+                params.base_offset_m + RIVER_LIFT_M * params.exaggeration,
+                ELEV_NORM_M,
+                params.center_lon_rad,
+            ],
+            sun: [
+                params.sun_dir.x,
+                params.sun_dir.y,
+                params.sun_dir.z,
+                params.atmosphere.clamp(0.0, 1.0),
+            ],
+            flags: [0, params.beauty as u32, 0, 0],
+        };
+        unsafe {
+            gpu.device
+                .cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.river_pipeline);
+            gpu.device
+                .cmd_bind_vertex_buffers(cb, 0, &[vertices.handle], &[0]);
+            gpu.device.cmd_push_constants(
+                cb,
+                self.pipeline_layout,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                0,
+                bytemuck::bytes_of(&push),
+            );
+            gpu.device.cmd_draw(cb, self.river_count, 1, 0, 0);
+        }
+    }
+
     pub fn record_clouds(&self, gpu: &Gpu, cb: vk::CommandBuffer, frame: usize, p: &GlobeParams) {
         if p.mode != ViewMode::Globe || p.cloud_opacity <= 0.0 || self.shell_index_count == 0 {
             return;
@@ -1006,11 +1111,15 @@ impl GlobeRenderer {
         self.shell_indices = None;
         self.coverage_buffers.clear();
         self.coverage_staging.clear();
+        if let Some(mut b) = self.river_vertices.take() {
+            b.destroy(&gpu.device, &mut gpu.alloc());
+        }
         unsafe {
             gpu.device.destroy_pipeline(self.pipeline, None);
             gpu.device.destroy_pipeline(self.star_pipeline, None);
             gpu.device.destroy_pipeline(self.halo_pipeline, None);
             gpu.device.destroy_pipeline(self.cloud_pipeline, None);
+            gpu.device.destroy_pipeline(self.river_pipeline, None);
             gpu.device
                 .destroy_pipeline_layout(self.pipeline_layout, None);
             gpu.device.destroy_pipeline_layout(self.star_layout, None);
@@ -1130,6 +1239,72 @@ fn create_cloud_pipeline(
             // Only the near face of the shell contributes; without this the
             // rim beyond the silhouette would be drawn twice.
             cull_back: true,
+        },
+    );
+    unsafe {
+        device.destroy_shader_module(vs, None);
+        device.destroy_shader_module(fs, None);
+    }
+    pipeline
+}
+
+fn create_river_pipeline(
+    gpu: &Gpu,
+    render_pass: vk::RenderPass,
+    layout: vk::PipelineLayout,
+) -> Result<vk::Pipeline> {
+    let device = &gpu.device;
+    let vs = load_shader(device, RIVER_VERT)?;
+    let fs = load_shader(device, RIVER_FRAG)?;
+    let name = c"main";
+    let stages = [
+        vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::VERTEX)
+            .module(vs)
+            .name(name),
+        vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::FRAGMENT)
+            .module(fs)
+            .name(name),
+    ];
+    let bindings = [vk::VertexInputBindingDescription::default()
+        .binding(0)
+        .stride(std::mem::size_of::<RiverVertex>() as u32)
+        .input_rate(vk::VertexInputRate::VERTEX)];
+    let attributes = [
+        vk::VertexInputAttributeDescription::default()
+            .location(0)
+            .binding(0)
+            .format(vk::Format::R32G32B32_SFLOAT)
+            .offset(0),
+        vk::VertexInputAttributeDescription::default()
+            .location(1)
+            .binding(0)
+            .format(vk::Format::R32_SFLOAT)
+            .offset(12),
+        vk::VertexInputAttributeDescription::default()
+            .location(2)
+            .binding(0)
+            .format(vk::Format::R32G32B32A32_SFLOAT)
+            .offset(16),
+    ];
+    let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
+        .vertex_binding_descriptions(&bindings)
+        .vertex_attribute_descriptions(&attributes);
+    let pipeline = build_pipeline(
+        gpu,
+        render_pass,
+        layout,
+        &stages,
+        &vertex_input,
+        PipelineOpts {
+            // Tested against the terrain (rivers hide behind the limb) but
+            // never written: they are a translucent overlay riding just above
+            // the surface.
+            depth_test: true,
+            depth_write: false,
+            blend: true,
+            cull_back: false,
         },
     );
     unsafe {

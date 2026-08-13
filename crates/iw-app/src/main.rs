@@ -14,6 +14,7 @@ mod inspector;
 mod layers;
 mod panel;
 mod pick;
+mod rivers;
 mod scrubber;
 mod store;
 mod terrain;
@@ -660,6 +661,12 @@ impl App {
                     renderer.update_cells_shaded(&display, &colors, Some(&shade))?;
                 }
                 _ => renderer.update_cells(&view.cells.elevation_m, &colors)?,
+            }
+            // Rivers ride on every layer (they are data too), rebuilt with
+            // each snapshot from the drainage graph.
+            if let Some(mesh) = mesh.as_ref() {
+                let ribbons = rivers::build(mesh, &view.cells, view.sea_level_m);
+                renderer.set_rivers(&ribbons)?;
             }
             self.cell_updates += 1;
         } else if self.args.test_sphere && !self.static_elevation.is_empty() {

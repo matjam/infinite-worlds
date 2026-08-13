@@ -18,6 +18,10 @@ pub struct ViewCells {
     pub precip_mm_yr: Vec<f32>,
     pub ice_thickness_m: Vec<f32>,
     pub water_flux_m3_yr: Vec<f32>,
+    /// Downstream CELL each cell drains to (`u32::MAX` when it has none) —
+    /// the river network, for rendering. Resolved at capture from the
+    /// planet's per-slot `flow_to` so observers never need the mesh CSR.
+    pub flow_to: Vec<u32>,
     pub lake_depth_m: Vec<f32>,
     /// Topmost rock of each column (None = bare mantle/none deposited).
     pub top_rock: Vec<Option<RockType>>,
@@ -69,6 +73,19 @@ impl PlanetView {
                 precip_mm_yr: planet.precip_mm_yr.clone(),
                 ice_thickness_m: planet.ice_thickness_m.clone(),
                 water_flux_m3_yr: planet.water_flux_m3_yr.clone(),
+                flow_to: (0..n)
+                    .map(|i| {
+                        let slot = planet.flow_to[i];
+                        if slot == crate::planet::FLOW_NONE {
+                            u32::MAX
+                        } else {
+                            *mesh
+                                .neighbors_of(i as u32)
+                                .get(slot as usize)
+                                .unwrap_or(&u32::MAX)
+                        }
+                    })
+                    .collect(),
                 lake_depth_m: planet.lake_depth_m.clone(),
                 top_rock,
                 plate_velocity_m_yr,

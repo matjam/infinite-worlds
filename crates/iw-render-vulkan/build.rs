@@ -6,13 +6,15 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const SHADERS: [&str; 6] = [
+const SHADERS: [&str; 8] = [
     "globe.vert",
     "globe.frag",
     "star.vert",
     "star.frag",
     "cloud.vert",
     "cloud.frag",
+    "river.vert",
+    "river.frag",
 ];
 
 /// Headers the stages include; changing one must rebuild every stage.

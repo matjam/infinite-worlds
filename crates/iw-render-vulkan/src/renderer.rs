@@ -170,6 +170,16 @@ impl Renderer {
             .update_cells_shaded(elevation_m, color_rgba8, shade)
     }
 
+    /// Replace the river ribbon geometry (see
+    /// [`crate::globe::GlobeRenderer::set_rivers`]).
+    pub fn set_rivers(&mut self, verts: &[crate::globe::RiverVertex]) -> Result<()> {
+        let gpu = &self.gpu;
+        self.globe
+            .as_mut()
+            .expect("globe alive")
+            .set_rivers(gpu, verts)
+    }
+
     /// Unit directions of the cloud shell's vertices (see
     /// [`crate::globe::GlobeRenderer::cloud_shell_dirs`]).
     pub fn cloud_shell_dirs(&self) -> &[glam::Vec3] {
@@ -373,6 +383,8 @@ impl Renderer {
         if let Some(globe) = self.globe.as_mut() {
             globe.record_starfield(&self.gpu, cb, params);
             globe.record_globe(&self.gpu, cb, frame, params);
+            // Rivers ride just above the terrain, depth-tested against it.
+            globe.record_rivers(&self.gpu, cb, params);
             // After the globe: the shell is translucent and depth-tested
             // against the surface it hangs over.
             globe.record_clouds(&self.gpu, cb, frame, params);
