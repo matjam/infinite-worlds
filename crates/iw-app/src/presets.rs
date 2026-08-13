@@ -43,10 +43,11 @@ pub const PRESETS: &[Preset] = &[
     },
     Preset {
         name: "Pangaea",
-        blurb: "sluggish mantle: the supercontinent barely breaks up",
+        blurb: "sluggish mantle, giant plates: the supercontinent barely breaks up",
         apply: |c| {
             c.tectonic_vigor = 0.45;
             c.water_budget = 0.88;
+            c.max_plate_fraction = 0.45;
         },
     },
     Preset {
@@ -85,11 +86,12 @@ pub const PRESETS: &[Preset] = &[
     },
     Preset {
         name: "Volcanic",
-        blurb: "restless mantle: hotspot chains, arcs and young mountains",
+        blurb: "restless mantle: many small plates, hotspot chains, young mountains",
         apply: |c| {
             c.hotspot_count = 30;
             c.tectonic_vigor = 1.8;
             c.craton_count = 8;
+            c.max_plate_fraction = 0.10;
         },
     },
 ];

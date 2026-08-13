@@ -222,6 +222,10 @@ pub fn show(
                     .suffix("x"),
             );
             ui.add(
+                egui::Slider::new(&mut state.config.max_plate_fraction, 0.08..=0.60)
+                    .text("Largest plate (frac of surface)"),
+            );
+            ui.add(
                 egui::Slider::new(&mut state.config.tectonic_vigor, 0.25..=2.0)
                     .text("Tectonic vigour")
                     .suffix("x"),
@@ -325,6 +329,7 @@ mod tests {
             axial_tilt_deg: 31.0,
             precip_multiplier: 2.0,
             tectonic_vigor: 0.75,
+            max_plate_fraction: 0.2,
             hotspot_count: 12,
             craton_count: 22,
             glacial_intensity: 1.5,

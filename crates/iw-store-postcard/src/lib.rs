@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 const PLANET_MAGIC: &[u8; 8] = b"IWPLANET";
 /// Checkpoint format version. Bump when the on-disk layout changes
 /// incompatibly; [`FileStore::load`] rejects mismatches with a clear error.
-const PLANET_FORMAT_VERSION: u32 = 4;
+const PLANET_FORMAT_VERSION: u32 = 5;
 /// `magic (8) + format version (4) + flags (4)`.
 const PLANET_HEADER_LEN: usize = 16;
 /// zstd compression level for checkpoints and history snapshots. Level 3 is

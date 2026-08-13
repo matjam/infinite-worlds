@@ -97,9 +97,11 @@ fn cratons_are_seeded_spaced_and_thick() {
         );
         assert_eq!(h.planet.columns.top_rock(c), Some(RockType::Granite));
     }
+    // Genesis target is 0.50 (raised with the recursive hand-off mosaic —
+    // the more active drift regime floods/consumes more margin).
     let frac = land as f32 / h.planet.n_cells() as f32;
     assert!(
-        (0.15..0.45).contains(&frac),
+        (0.15..0.55).contains(&frac),
         "continental fraction {frac} out of range"
     );
 
@@ -184,8 +186,43 @@ fn handoff_partitions_the_whole_planet() {
     h.run(&mut p, Phase::Drift, 1);
 
     plates_are_partition(&h.planet, &h.mesh).expect("plate partition");
+    // Recursive 30:70..50:50 splitting to a 15%-of-surface cap: roughly
+    // 8..16 varied-size plates, capped at 24.
     let np = h.planet.plates.len();
-    assert!((3..=10).contains(&np), "{np} plates after hand-off");
+    assert!((6..=24).contains(&np), "{np} plates after hand-off");
+}
+
+/// The point of the recursive hand-off split: the supercontinent must START
+/// drift dealt onto several plates (boundaries under Pangaea), not sit whole
+/// on one plate with the rest of the mosaic in the ocean. With ~30% of the
+/// surface continental and no plate allowed more than 15%, at least three
+/// plates have to hold a real share of the landmass.
+#[test]
+fn handoff_deals_pangaea_onto_several_plates() {
+    let mut h = Harness::level(5);
+    let mut p = TectonicsProcess::new();
+    h.run_crustal_formation(&mut p);
+    h.run(&mut p, Phase::Drift, 1);
+
+    let np = h.planet.plates.len();
+    let mut cont_cells = vec![0usize; np];
+    let mut total_cont = 0usize;
+    for c in 0..h.planet.n_cells() {
+        if h.planet.crust_type[c] == CrustType::Continental {
+            let pl = h.planet.plate_id[c] as usize;
+            if pl < np {
+                cont_cells[pl] += 1;
+                total_cont += 1;
+            }
+        }
+    }
+    // Plates holding at least 5% of the continental crust each.
+    let sharers = cont_cells.iter().filter(|&&m| m * 20 >= total_cont).count();
+    assert!(
+        sharers >= 3,
+        "Pangaea must start on several plates: {sharers} plates hold >=5% of it \
+         (distribution {cont_cells:?})"
+    );
 }
 
 // --- Drift kinematics ---
@@ -575,7 +612,7 @@ fn other_seeds_stay_well_behaved() {
             .unwrap_or_else(|e| panic!("seed {seed} hand-off: {e}"));
         let np = h.planet.plates.len();
         assert!(
-            (3..=10).contains(&np),
+            (6..=24).contains(&np),
             "seed {seed}: {np} plates at hand-off"
         );
 

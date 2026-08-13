@@ -151,6 +151,7 @@ proptest! {
             axial_tilt_deg,
             precip_multiplier,
             tectonic_vigor,
+            max_plate_fraction: water_budget * 0.3,
             hotspot_count,
             craton_count,
             glacial_intensity,

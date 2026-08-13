@@ -97,7 +97,11 @@ const OUTLINE_SCALE_CAP_RAD: f32 = 0.30;
 /// nominal radius, the modulated radius being squared in the cap area) and to
 /// the every-step thickness profile: 0.37 still lands sea level within +-320 m
 /// and land at 24-25% on seeds 42/7/1337.
-pub(crate) const CONTINENTAL_TARGET_FRACTION: f64 = 0.44;
+/// Calibration: raised from 0.44 when the recursive hand-off mosaic (10+
+/// plates with boundaries through the supercontinent) made the drift era
+/// far more active — more rifted margins and collisions flooded/consumed
+/// enough continent to pull land from ~26% to ~15% of the surface.
+pub(crate) const CONTINENTAL_TARGET_FRACTION: f64 = 0.50;
 /// Per-craton area spread about the mean, as a multiplier.
 const CRATON_AREA_SPREAD: (f64, f64) = (0.65, 1.35);
 

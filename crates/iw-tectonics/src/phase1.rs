@@ -21,9 +21,7 @@ use rayon::prelude::*;
 use crate::craton::Genesis;
 use crate::crust::{make_continental, make_fresh_oceanic};
 use crate::geom::{omega_for_velocity, random_unit, tangent_toward};
-use crate::topology::{
-    bfs_distance, compact_plates, enforce_contiguity, flood_labels_warped, UnionFind, UNASSIGNED,
-};
+use crate::topology::{compact_plates, enforce_contiguity, UNASSIGNED};
 use crate::{
     MeshCache, Scratch, AGE_DENSITY_COEFF, OCEANIC_DENSITY_KG_M3, OCEANIC_DENSITY_MAX_KG_M3,
 };
@@ -31,22 +29,20 @@ use crate::{
 /// Landmass drift during the crustal-formation era, m/yr. Slow: the era is
 /// about differentiation, not travel — real motion starts with the hand-off.
 const GENESIS_SPEED_M_YR: f64 = 0.02;
-/// Plate count the hand-off partition aims for.
-const TARGET_PLATES_MIN: usize = 5;
-/// Plate count the hand-off partition will not exceed.
-const TARGET_PLATES_MAX: usize = 8;
-/// Speed given to the ocean plates invented at the hand-off, m/yr.
+/// Speed given to pure-ocean plates invented at the hand-off, m/yr.
 const SEED_PLATE_SPEED_M_YR: f32 = 0.04;
-/// Divergence kick applied to the two halves of a split supercontinent at
-/// the drift handoff, m/yr. Gentler than a live rift's separation (0.07):
-/// this is a nudge for slab pull to amplify, not an imposed breakup.
+/// Divergence kick applied to both sides of every hand-off split, m/yr.
+/// Gentler than a live rift's separation (0.07): this is a nudge for slab
+/// pull to amplify, not an imposed breakup.
 const HANDOFF_SPLIT_KICK_M_YR: f32 = 0.03;
-/// Distance-metric warp for the hand-off Voronoi, as a fraction of the base
-/// cost. Straight great-circle plate boundaries are the tell-tale of a Voronoi
-/// partition; a noisy metric makes them meander.
-const PARTITION_WARP: f32 = 0.45;
-/// Frequency of that warp field on the unit sphere.
-const PARTITION_WARP_FREQ: f32 = 3.0;
+/// Hard ceiling on the initial plate count (safety, not a target).
+const HANDOFF_MAX_PLATES: usize = 24;
+/// Meander amplitude of a hand-off cut, in units of the axis coordinate
+/// (which spans -1..1 across the sphere): the boundary wanders by roughly
+/// this fraction of a hemisphere instead of running as a clean circle.
+const HANDOFF_CUT_MEANDER: f32 = 0.22;
+/// Frequency of the meander noise on the unit sphere.
+const HANDOFF_CUT_FREQ: f32 = 2.6;
 /// Fraction of cells flagged as inherited weakness (proto-sutures) at the
 /// hand-off, so later rifting can follow noise creases across the whole
 /// supercontinent.
@@ -191,9 +187,15 @@ pub(crate) fn needs_partition(planet: &Planet) -> bool {
     np == 0 || planet.plate_id.iter().any(|p| *p as usize >= np)
 }
 
-/// Partition every cell into the initial plate set: one plate per landmass
-/// plus its surrounding ocean (graph Voronoi), topped up with pure ocean
-/// plates so the planet starts Drift with 5-8 plates.
+/// Partition every cell into the initial plate set by RECURSIVE SPLITTING:
+/// the whole lithosphere starts as one plate, and the largest plate is
+/// repeatedly cut at a random 30:70..50:50 area ratio along a
+/// noise-meandered great-circle band, until no plate holds more than
+/// [`HANDOFF_MAX_PLATE_FRAC`] of the surface. Cuts land wherever the split
+/// axis puts them — which statistically means THROUGH the supercontinent,
+/// since it covers a third of the sphere. The result is a mosaic of
+/// varied-size plates spread over the whole globe instead of one continental
+/// giant with a cluster of fillers at its antipode.
 pub(crate) fn partition_into_plates(
     planet: &mut Planet,
     mesh: &Mesh,
@@ -202,234 +204,94 @@ pub(crate) fn partition_into_plates(
 ) {
     let n = planet.n_cells();
     let ncr = planet.plates.len();
+    let area = |c: usize| mesh.areas_km2[c] as f64;
+    let total_area: f64 = mesh.areas_km2.iter().map(|a| *a as f64).sum();
 
-    // Landmass -> cluster (welds can only come from later eras; kept for
-    // resilience when a re-run enters here with welded plates).
-    let mut uf = UnionFind::new(ncr.max(1));
-    for k in 0..ncr {
-        if let Some(w) = planet.plates[k].welded_to {
-            if (w as usize) < ncr {
-                uf.union(k as u16, w);
-            }
-        }
-    }
-    let mut cluster_of = vec![u16::MAX; ncr];
-    let mut cluster_omega: Vec<DVec3> = Vec::new();
-    let mut cluster_mass: Vec<f64> = Vec::new();
-    let mut mass = vec![0f64; ncr];
-    for c in 0..n {
-        let p = planet.plate_id[c];
-        if (p as usize) < ncr && planet.crust_type[c] == CrustType::Continental {
-            mass[p as usize] += 1.0;
-        }
-    }
-    for k in 0..ncr {
-        if mass[k] == 0.0 {
-            continue;
-        }
-        let r = uf.find(k as u16) as usize;
-        if cluster_of[r] == u16::MAX {
-            cluster_of[r] = cluster_omega.len() as u16;
-            cluster_omega.push(DVec3::ZERO);
-            cluster_mass.push(0.0);
-        }
-        let ci = cluster_of[r] as usize;
-        cluster_omega[ci] += planet.plates[k].euler_pole * planet.plates[k].omega_rad_myr * mass[k];
-        cluster_mass[ci] += mass[k];
-        cluster_of[k] = cluster_of[r];
-    }
+    // Everything starts on plate 0; recursive splits carve it up.
+    scratch.u16a.fill(0);
+    let mut plate_area: Vec<f64> = vec![total_area];
+    // (parent, child) of each split, in order: rift partners come from here.
+    let mut splits: Vec<(u16, u16)> = Vec::new();
+    let cut_noise = Noise3::new(noise_seed(planet.config.seed, "tectonics/handoff-cuts"));
 
-    // A welded supercontinent arrives here as ONE cluster, and the ocean-seed
-    // filler below then places every remaining plate at maximal distance from
-    // it — the drift era reliably started with all boundaries in the ocean
-    // and the whole landmass on a single immortal plate. Split the dominant
-    // cluster in two along its craton structure (Laurasia/Gondwana): group
-    // its member cratons around the farthest pair of craton centroids, so the
-    // initial boundary transects the landmass between shields.
-    let mut split_pair: Option<(u16, u16)> = None;
-    {
-        let total_cont: f64 = cluster_mass.iter().sum();
-        let big =
-            (0..cluster_mass.len()).max_by(|a, b| cluster_mass[*a].total_cmp(&cluster_mass[*b]));
-        if let Some(big) = big.filter(|b| total_cont > 0.0 && cluster_mass[*b] > 0.55 * total_cont)
-        {
-            let mut csum = vec![DVec3::ZERO; ncr];
-            for c in 0..n {
-                let p = planet.plate_id[c] as usize;
-                if p < ncr && planet.crust_type[c] == CrustType::Continental {
-                    csum[p] += mesh.centers[c].as_dvec3();
-                }
-            }
-            let members: Vec<usize> = (0..ncr)
-                .filter(|k| mass[*k] > 0.0 && cluster_of[*k] == big as u16)
-                .collect();
-            if members.len() >= 2 {
-                let dir = |k: usize| csum[k].normalize_or(DVec3::Z);
-                let (mut sa, mut sb, mut best) = (members[0], members[1], f64::INFINITY);
-                for (i, &a) in members.iter().enumerate() {
-                    for &b in &members[i + 1..] {
-                        let d = dir(a).dot(dir(b));
-                        if d < best {
-                            (sa, sb, best) = (a, b, d);
-                        }
-                    }
-                }
-                let new_id = cluster_omega.len() as u16;
-                cluster_omega.push(DVec3::ZERO);
-                cluster_mass.push(0.0);
-                let (da, db) = (dir(sa), dir(sb));
-                let mut moved = 0.0f64;
-                for &k in &members {
-                    if dir(k).dot(db) > dir(k).dot(da) {
-                        cluster_of[k] = new_id;
-                        cluster_omega[big] -=
-                            planet.plates[k].euler_pole * planet.plates[k].omega_rad_myr * mass[k];
-                        cluster_omega[new_id as usize] +=
-                            planet.plates[k].euler_pole * planet.plates[k].omega_rad_myr * mass[k];
-                        moved += mass[k];
-                    }
-                }
-                cluster_mass[big] -= moved;
-                *cluster_mass.last_mut().expect("just pushed") = moved;
-                if moved > 0.0 {
-                    split_pair = Some((big as u16, new_id));
-                }
-            }
+    // The largest-plate cap is the user's mosaic knob (config
+    // `max_plate_fraction`): 0.15 yields ~10-14 varied plates, large values
+    // approach one supercontinental plate.
+    let max_frac = planet.config.max_plate_fraction.clamp(0.08, 0.60);
+    while plate_area.len() < HANDOFF_MAX_PLATES {
+        let (p, biggest) = plate_area
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(b.1))
+            .expect("at least one plate");
+        if *biggest <= max_frac * total_area {
+            break;
         }
-    }
-
-    // Seed labels from continental cells.
-    scratch.u16a.fill(u16::MAX);
-    let mut cluster_sum = vec![DVec3::ZERO; cluster_mass.len()];
-    for c in 0..n {
-        let p = planet.plate_id[c];
-        if (p as usize) < ncr
-            && planet.crust_type[c] == CrustType::Continental
-            && cluster_of[p as usize] != u16::MAX
-        {
-            let ci = cluster_of[p as usize];
-            scratch.u16a[c] = ci;
-            cluster_sum[ci as usize] += mesh.centers[c].as_dvec3();
-        }
-    }
-
-    // Too many clusters: fold the smallest into its nearest neighbour.
-    while cluster_mass.len() > TARGET_PLATES_MAX {
-        let small = (0..cluster_mass.len())
-            .min_by(|a, b| cluster_mass[*a].total_cmp(&cluster_mass[*b]))
-            .expect("non-empty");
-        let sc = cluster_sum[small].normalize_or(DVec3::Z);
-        let near = (0..cluster_mass.len())
-            .filter(|k| *k != small)
-            .max_by(|a, b| {
-                sc.dot(cluster_sum[*a].normalize_or(DVec3::Z))
-                    .total_cmp(&sc.dot(cluster_sum[*b].normalize_or(DVec3::Z)))
+        let p = p as u16;
+        let ratio: f64 = ctx.rng.random_range(0.30..0.50);
+        let axis = random_unit(&mut ctx.rng);
+        // Score = position along the axis plus a meander term, so the cut is
+        // a wandering band instead of a clean small circle. The noise is
+        // offset per split so successive cuts do not share their wiggles.
+        let offset = glam::Vec3::splat(splits.len() as f32 * 13.7 + 3.1);
+        let mut members: Vec<(f32, u32)> = (0..n as u32)
+            .filter(|c| scratch.u16a[*c as usize] == p)
+            .map(|c| {
+                let d = mesh.centers[c as usize];
+                let score = d.dot(axis)
+                    + HANDOFF_CUT_MEANDER
+                        * cut_noise.fbm(d * HANDOFF_CUT_FREQ + offset, 3, 2.0, 0.5);
+                (score, c)
             })
-            .expect("at least two clusters");
-        let (w, m, s) = (
-            cluster_omega[small],
-            cluster_mass[small],
-            cluster_sum[small],
-        );
-        cluster_omega[near] += w;
-        cluster_mass[near] += m;
-        cluster_sum[near] += s;
-        cluster_omega.remove(small);
-        cluster_mass.remove(small);
-        cluster_sum.remove(small);
-        // Keep the split pair pointing at the right clusters through the
-        // renumbering; drop it if either half was folded away.
-        split_pair = split_pair.and_then(|(a, b)| {
-            let remap = |x: u16| {
-                let x = x as usize;
-                if x == small {
-                    None
-                } else if x > small {
-                    Some((x - 1) as u16)
-                } else {
-                    Some(x as u16)
-                }
-            };
-            remap(a).zip(remap(b))
-        });
-        for l in scratch.u16a.iter_mut() {
-            if *l == u16::MAX {
-                continue;
+            .collect();
+        if members.len() < 4 {
+            break;
+        }
+        members.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+        let target = plate_area[p as usize] * ratio;
+        let child = plate_area.len() as u16;
+        let mut moved = 0.0f64;
+        for (_, c) in &members {
+            if moved >= target {
+                break;
             }
-            let k = *l as usize;
-            *l = if k == small {
-                (if near > small { near - 1 } else { near }) as u16
-            } else if k > small {
-                (k - 1) as u16
-            } else {
-                k as u16
-            };
+            scratch.u16a[*c as usize] = child;
+            moved += area(*c as usize);
+        }
+        if moved <= 0.0 || moved >= plate_area[p as usize] {
+            break;
+        }
+        plate_area[p as usize] -= moved;
+        plate_area.push(moved);
+        splits.push((p, child));
+    }
+
+    // Build the plate table. A plate inherits the (mass-weighted) motion of
+    // the genesis landmasses under it; pure ocean plates get a slow start in
+    // a random direction. Everyone gets a plain centroid for the kicks.
+    let np = plate_area.len();
+    let mut cont_omega = vec![DVec3::ZERO; np];
+    let mut cont_mass = vec![0f64; np];
+    let mut centroid = vec![DVec3::ZERO; np];
+    for c in 0..n {
+        let l = scratch.u16a[c] as usize;
+        centroid[l] += mesh.centers[c].as_dvec3() * area(c);
+        let old = planet.plate_id[c] as usize;
+        if old < ncr && planet.crust_type[c] == CrustType::Continental {
+            cont_omega[l] +=
+                planet.plates[old].euler_pole * planet.plates[old].omega_rad_myr * area(c);
+            cont_mass[l] += area(c);
         }
     }
-
-    // Too few: invent ocean plates at the points furthest from any continent.
-    let n_extra = TARGET_PLATES_MIN.saturating_sub(cluster_mass.len());
-    let mut extra_seeds: Vec<u32> = Vec::with_capacity(n_extra);
-    if n_extra > 0 {
-        scratch.u32a.resize(n, 0);
-        for _ in 0..n_extra {
-            let sources: Vec<u32> = (0..n as u32)
-                .filter(|c| scratch.u16a[*c as usize] != u16::MAX || extra_seeds.contains(c))
-                .collect();
-            if sources.is_empty() {
-                extra_seeds.push(0);
-                continue;
-            }
-            bfs_distance(mesh, &sources, &mut scratch.u32a);
-            let far = (0..n)
-                .filter(|c| scratch.u32a[*c] != u32::MAX)
-                .max_by_key(|c| scratch.u32a[*c])
-                .unwrap_or(0) as u32;
-            extra_seeds.push(far);
-        }
-    }
-
-    let n_clusters = cluster_mass.len();
-    for (i, &s) in extra_seeds.iter().enumerate() {
-        scratch.u16a[s as usize] = (n_clusters + i) as u16;
-    }
-    // Noise-warped graph Voronoi: cheap-to-cross cells pull a plate's territory
-    // out along the noise's low ridges, so the initial boundaries wander the way
-    // real ones do instead of running as clean great-circle bisectors.
-    let warp = Noise3::new(noise_seed(planet.config.seed, "tectonics/plate-warp"));
-    let cost: Vec<f32> = mesh
-        .centers
-        .par_iter()
-        .map(|d| (1.0 + PARTITION_WARP * warp.fbm(*d * PARTITION_WARP_FREQ, 4, 2.0, 0.5)).max(0.2))
-        .collect();
-    flood_labels_warped(mesh, &mut scratch.u16a, &cost);
-    debug_assert!(scratch.u16a.iter().all(|l| *l != u16::MAX));
-
-    // Build the plate table.
-    let mut plates: Vec<Plate> = Vec::with_capacity(n_clusters + extra_seeds.len());
-    for i in 0..n_clusters {
-        let w = if cluster_mass[i] > 0.0 {
-            cluster_omega[i] / cluster_mass[i]
+    let mut plates: Vec<Plate> = Vec::with_capacity(np);
+    for i in 0..np {
+        let w = if cont_mass[i] > 0.0 {
+            cont_omega[i] / cont_mass[i]
         } else {
-            DVec3::Z * 1e-6
+            let r = centroid[i].normalize_or(DVec3::Z).as_vec3();
+            let dir = tangent_toward(r, random_unit(&mut ctx.rng));
+            omega_for_velocity(r, dir * SEED_PLATE_SPEED_M_YR)
         };
-        let omega = w.length();
-        plates.push(Plate {
-            euler_pole: if omega > 1e-12 { w / omega } else { DVec3::Z },
-            omega_rad_myr: omega,
-            welded_to: None,
-            accum: glam::DQuat::IDENTITY,
-            rift_partner: None,
-            rift_born_myr: f64::NEG_INFINITY,
-        });
-    }
-    for &s in &extra_seeds {
-        let r = mesh.centers[s as usize];
-        let dir = {
-            let t = random_unit(&mut ctx.rng);
-            tangent_toward(r, t)
-        };
-        let w = omega_for_velocity(r, dir * SEED_PLATE_SPEED_M_YR);
         let omega = w.length();
         plates.push(Plate {
             euler_pole: if omega > 1e-12 { w / omega } else { DVec3::Z },
@@ -441,37 +303,32 @@ pub(crate) fn partition_into_plates(
         });
     }
 
-    // The two halves of a split supercontinent start with near-identical
-    // motion, and QUIET_MERGE would re-weld the handoff boundary within a
-    // dozen Myr — before slab pull has differentiated them. Give the pair
-    // the same young-rift immunity as a live rift, plus a gentle divergence
-    // kick for the forces to amplify.
-    if let Some((a, b)) = split_pair {
+    // Each split pair starts with near-identical motion, and QUIET_MERGE
+    // would stitch the mosaic back together within a dozen Myr — before slab
+    // pull has differentiated anything. Give every pair the same young-rift
+    // immunity as a live rift plus a gentle divergence kick to amplify.
+    // Later splits overwrite a plate's partner: its freshest boundary is the
+    // one that needs the protection most.
+    for &(a, b) in &splits {
         let (ai, bi) = (a as usize, b as usize);
-        if ai < plates.len() && bi < plates.len() {
-            let ca = cluster_sum[ai].normalize_or(DVec3::Z).as_vec3();
-            let cb = cluster_sum[bi].normalize_or(DVec3::Z).as_vec3();
-            let kick = |plate: &mut Plate, from: glam::Vec3, toward: glam::Vec3| {
-                let w = plate.euler_pole * plate.omega_rad_myr
-                    + omega_for_velocity(
-                        from,
-                        -tangent_toward(from, toward) * HANDOFF_SPLIT_KICK_M_YR,
-                    );
-                let omega = w.length();
-                plate.euler_pole = if omega > 1e-12 { w / omega } else { DVec3::Z };
-                plate.omega_rad_myr = omega;
-            };
-            kick(&mut plates[ai], ca, cb);
-            kick(&mut plates[bi], cb, ca);
-            plates[ai].rift_partner = Some(b);
-            plates[ai].rift_born_myr = planet.time_myr;
-            plates[bi].rift_partner = Some(a);
-            plates[bi].rift_born_myr = planet.time_myr;
-            ctx.progress
-                .event(iw_core::ProgressEvent::Milestone(format!(
-                    "the supercontinent hands off as two plates ({a} and {b})"
-                )));
-        }
+        let ca = centroid[ai].normalize_or(DVec3::Z).as_vec3();
+        let cb = centroid[bi].normalize_or(DVec3::Z).as_vec3();
+        let kick = |plate: &mut Plate, from: glam::Vec3, away_from: glam::Vec3| {
+            let w = plate.euler_pole * plate.omega_rad_myr
+                + omega_for_velocity(
+                    from,
+                    tangent_toward(from, away_from) * -HANDOFF_SPLIT_KICK_M_YR,
+                );
+            let omega = w.length();
+            plate.euler_pole = if omega > 1e-12 { w / omega } else { DVec3::Z };
+            plate.omega_rad_myr = omega;
+        };
+        kick(&mut plates[ai], ca, cb);
+        kick(&mut plates[bi], cb, ca);
+        plates[ai].rift_partner = Some(b);
+        plates[ai].rift_born_myr = planet.time_myr;
+        plates[bi].rift_partner = Some(a);
+        plates[bi].rift_born_myr = planet.time_myr;
     }
 
     planet.plate_id.copy_from_slice(&scratch.u16a);

@@ -51,6 +51,12 @@ pub struct PlanetConfig {
     pub precip_multiplier: f32,
     /// Scales plate speeds and volcanism rates.
     pub tectonic_vigor: f32,
+    /// Largest surface fraction any single plate may hold at the drift
+    /// hand-off: the recursive splitter keeps cutting the biggest plate
+    /// (random 30:70..50:50) until everything fits under this. Small values
+    /// give a busy mosaic of little plates; large values approach one
+    /// supercontinental plate.
+    pub max_plate_fraction: f64,
     pub hotspot_count: u32,
     pub craton_count: u32,
     /// Scales the amplitude of Phase-4 glacial temperature cycles.
@@ -78,6 +84,7 @@ impl Default for PlanetConfig {
             axial_tilt_deg: 23.4,
             precip_multiplier: 1.0,
             tectonic_vigor: 1.0,
+            max_plate_fraction: 0.15,
             hotspot_count: 8,
             craton_count: 14,
             glacial_intensity: 1.0,
@@ -133,6 +140,7 @@ impl PlanetConfig {
         self.axial_tilt_deg = self.axial_tilt_deg.clamp(0.0, 45.0);
         self.precip_multiplier = self.precip_multiplier.clamp(0.25, 4.0);
         self.tectonic_vigor = self.tectonic_vigor.clamp(0.25, 2.0);
+        self.max_plate_fraction = self.max_plate_fraction.clamp(0.08, 0.60);
         self.hotspot_count = self.hotspot_count.min(30);
         self.craton_count = self.craton_count.clamp(4, 30);
         self.glacial_intensity = self.glacial_intensity.clamp(0.0, 2.0);

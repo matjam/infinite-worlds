@@ -4,8 +4,7 @@
 //! Every routine iterates cells in index order and neighbours in mesh order,
 //! so results never depend on hash or thread ordering.
 
-use std::cmp::Reverse;
-use std::collections::{BinaryHeap, VecDeque};
+use std::collections::VecDeque;
 
 use iw_core::{Planet, Plate};
 use iw_mesh::Mesh;
@@ -15,40 +14,6 @@ use rustc_hash::FxHashMap;
 /// It is deliberately out of range of `planet.plates`, which is what makes
 /// "has the phase-1 -> drift partition run yet?" a pure function of `Planet`.
 pub(crate) const UNASSIGNED: u16 = u16::MAX;
-
-/// Disjoint-set over small id spaces (cratons, plates).
-pub(crate) struct UnionFind {
-    parent: Vec<u16>,
-}
-
-impl UnionFind {
-    pub(crate) fn new(n: usize) -> UnionFind {
-        UnionFind {
-            parent: (0..n as u16).collect(),
-        }
-    }
-
-    pub(crate) fn find(&mut self, mut x: u16) -> u16 {
-        while self.parent[x as usize] != x {
-            let g = self.parent[self.parent[x as usize] as usize];
-            self.parent[x as usize] = g;
-            x = g;
-        }
-        x
-    }
-
-    /// Merge the sets of `a` and `b`; the smaller id wins so the outcome does
-    /// not depend on call order. Returns true when a merge actually happened.
-    pub(crate) fn union(&mut self, a: u16, b: u16) -> bool {
-        let (ra, rb) = (self.find(a), self.find(b));
-        if ra == rb {
-            return false;
-        }
-        let (lo, hi) = if ra < rb { (ra, rb) } else { (rb, ra) };
-        self.parent[hi as usize] = lo;
-        true
-    }
-}
 
 /// Label every cell with the index of its connected component within its own
 /// plate. `out[c]` is a component id unique across the whole planet.
@@ -275,59 +240,4 @@ pub(crate) fn absorb_tiny_plates(planet: &mut Planet, mesh: &Mesh, min_cells: us
         changed = true;
     }
     changed
-}
-
-/// Multi-source Dijkstra over the cell graph with a per-cell traversal cost:
-/// a graph Voronoi under a warped metric. `label[c] == u16::MAX` marks a cell
-/// still to be claimed; every other cell seeds the frontier with its label.
-/// (This replaced a plain hop-count BFS flood: unit costs made every boundary a
-/// great-circle bisector.)
-///
-/// Determinism: the frontier is ordered by `(distance bits, cell index)`, and
-/// costs are positive, so IEEE-754 bit order *is* numeric order and ties break
-/// on cell index. No hash or thread ordering is involved.
-pub(crate) fn flood_labels_warped(mesh: &Mesh, label: &mut [u16], cost: &[f32]) {
-    let n = label.len();
-    let mut dist = vec![f32::INFINITY; n];
-    let mut heap: BinaryHeap<Reverse<(u32, u32)>> = BinaryHeap::new();
-    for (c, l) in label.iter().enumerate() {
-        if *l != u16::MAX {
-            dist[c] = 0.0;
-            heap.push(Reverse((0, c as u32)));
-        }
-    }
-    while let Some(Reverse((bits, c))) = heap.pop() {
-        let d = f32::from_bits(bits);
-        if d > dist[c as usize] {
-            continue; // stale frontier entry
-        }
-        let l = label[c as usize];
-        for &m in mesh.neighbors_of(c) {
-            let nd = d + cost[m as usize].max(0.0);
-            if nd < dist[m as usize] {
-                dist[m as usize] = nd;
-                label[m as usize] = l;
-                heap.push(Reverse((nd.to_bits(), m)));
-            }
-        }
-    }
-}
-
-/// Graph distance (in hops) from the set `sources` to every cell.
-pub(crate) fn bfs_distance(mesh: &Mesh, sources: &[u32], out: &mut [u32]) {
-    out.fill(u32::MAX);
-    let mut queue: VecDeque<u32> = VecDeque::new();
-    for &s in sources {
-        out[s as usize] = 0;
-        queue.push_back(s);
-    }
-    while let Some(c) = queue.pop_front() {
-        let d = out[c as usize] + 1;
-        for &m in mesh.neighbors_of(c) {
-            if out[m as usize] == u32::MAX {
-                out[m as usize] = d;
-                queue.push_back(m);
-            }
-        }
-    }
 }
