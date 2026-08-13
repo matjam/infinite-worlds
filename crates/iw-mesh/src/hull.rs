@@ -16,8 +16,11 @@ use glam::DVec3;
 /// One triangular face of the hull, counter-clockwise seen from outside.
 #[derive(Debug, Clone, Copy)]
 pub struct Face {
+    /// First vertex (input point index).
     pub a: u32,
+    /// Second vertex, CCW from `a` seen from outside.
     pub b: u32,
+    /// Third vertex.
     pub c: u32,
 }
 
