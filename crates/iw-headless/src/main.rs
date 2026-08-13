@@ -86,7 +86,17 @@ fn run_gen(args: GenArgs) -> anyhow::Result<()> {
     run_with_history(&mut sim, &history)?;
     let runtime_secs = start.elapsed().as_secs_f64();
 
-    finish(sim.planet(), &mesh, runtime_secs, &args.out, args.maps)
+    // The planet may live on a different tessellation than the one the run
+    // started with (era re-tessellation): render through the sim's CURRENT
+    // mesh, never the stale launch mesh.
+    let final_mesh = std::sync::Arc::clone(sim.mesh());
+    finish(
+        sim.planet(),
+        &final_mesh,
+        runtime_secs,
+        &args.out,
+        args.maps,
+    )
 }
 
 fn run_resume(args: ResumeArgs) -> anyhow::Result<()> {
@@ -123,7 +133,14 @@ fn run_resume(args: ResumeArgs) -> anyhow::Result<()> {
     run_with_history(&mut sim, &history)?;
     let runtime_secs = start.elapsed().as_secs_f64();
 
-    finish(sim.planet(), &mesh, runtime_secs, &args.from, args.maps)
+    let final_mesh = std::sync::Arc::clone(sim.mesh());
+    finish(
+        sim.planet(),
+        &final_mesh,
+        runtime_secs,
+        &args.from,
+        args.maps,
+    )
 }
 
 /// Step to completion, pushing a history snapshot every time the simulation

@@ -61,20 +61,16 @@ pub fn build_from_generators(generators: &[DVec3]) -> Mesh {
         }
     }
 
-    // Sort each cell's incident triangles CCW and read the neighbor ring off
-    // the shared Delaunay edges — identical logic to the Goldberg dual, but
-    // over variable valence.
+    // Build each cell's corner ring COMBINATORIALLY: rotate every incident
+    // triangle so the generator comes first, (g, u, v) — CCW around g means
+    // the successor is the triangle whose `u` equals this one's `v`. This is
+    // exact for any geometry (an angle sort scrambles near-cocircular
+    // circumcenters and corrupts the ring — the confetti bug). The neighbor
+    // across the edge between corner k and k+1 is exactly `v` of corner k's
+    // triangle, so the CSR contract holds by construction.
     let mut corners = vec![0u32; total];
     let mut neighbors = vec![0u32; total];
     let centers_f32: Vec<Vec3> = generators.iter().map(|g| g.as_vec3()).collect();
-
-    struct SortScratch {
-        ring: Vec<(f32, u32)>,
-    }
-    thread_local! {
-        static SCRATCH: std::cell::RefCell<SortScratch> =
-            const { std::cell::RefCell::new(SortScratch { ring: Vec::new() }) };
-    }
 
     // Split output CSR ranges per cell for safe parallel writes.
     let mut cell_ranges: Vec<(usize, usize)> = Vec::with_capacity(n);
@@ -85,48 +81,35 @@ pub fn build_from_generators(generators: &[DVec3]) -> Mesh {
     let neighbors_ptr = SendPtr(neighbors.as_mut_ptr());
     (0..n).into_par_iter().for_each(|g| {
         let (lo, hi) = cell_ranges[g];
-        let center = centers_f32[g];
-        // Tangent basis for angular sorting.
-        let axis = if center.z.abs() < 0.9 {
-            Vec3::Z
-        } else {
-            Vec3::X
-        };
-        let t = axis.cross(center).normalize();
-        let b = center.cross(t);
-        SCRATCH.with(|s| {
-            let ring = &mut s.borrow_mut().ring;
-            ring.clear();
-            for &tri in &incident[lo..hi] {
-                let v = vertices[tri as usize];
-                let ang = (v.dot(b)).atan2(v.dot(t));
-                ring.push((ang, tri));
+        let k = hi - lo;
+        // (u, v, tri) per incident triangle, rotated so g comes first.
+        let mut ring: smallvec::SmallVec<[(u32, u32, u32); 10]> = smallvec::SmallVec::new();
+        for &tri in &incident[lo..hi] {
+            let f = faces[tri as usize];
+            let (u, v) = if f.a == g as u32 {
+                (f.b, f.c)
+            } else if f.b == g as u32 {
+                (f.c, f.a)
+            } else {
+                (f.a, f.b)
+            };
+            ring.push((u, v, tri));
+        }
+        // Chain: successor of (_, v, _) is the entry whose u == v.
+        let mut idx = 0usize;
+        for i in 0..k {
+            let (_, v, tri) = ring[idx];
+            unsafe {
+                *corners_ptr.get().add(lo + i) = tri;
+                *neighbors_ptr.get().add(lo + i) = v;
             }
-            ring.sort_unstable_by(|x, y| x.0.total_cmp(&y.0));
-            // CCW check: the sort above is CCW iff (t, b, center) is
-            // right-handed, which it is (b = center x t).
-            for (i, (_, tri)) in ring.iter().enumerate() {
-                unsafe {
-                    *corners_ptr.get().add(lo + i) = *tri;
-                }
-                // Neighbor across the edge between corner i and corner i+1:
-                // the two triangles share exactly one Delaunay edge (g, v);
-                // that v is the neighbor cell.
-                let next_tri = ring[(i + 1) % ring.len()].1;
-                let fa = faces[*tri as usize];
-                let fb = faces[next_tri as usize];
-                let mut shared = u32::MAX;
-                for x in [fa.a, fa.b, fa.c] {
-                    if x != g as u32 && (x == fb.a || x == fb.b || x == fb.c) {
-                        shared = x;
-                    }
-                }
-                debug_assert!(shared != u32::MAX, "adjacent dual corners share no edge");
-                unsafe {
-                    *neighbors_ptr.get().add(lo + i) = shared;
-                }
+            if i + 1 < k {
+                idx = ring
+                    .iter()
+                    .position(|(u, _, _)| *u == v)
+                    .expect("open dual ring: hull adjacency is inconsistent");
             }
-        });
+        }
     });
 
     // Areas: spherical polygon excess, fanned from the cell center (f64).

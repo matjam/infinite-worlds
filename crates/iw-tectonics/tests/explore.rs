@@ -135,6 +135,86 @@ fn level8_scaling() {
 ///
 /// `IW_DUMP_LEVEL`, `IW_DUMP_SEED`, `IW_DUMP_STEPS` and `IW_DUMP_OUT` override
 /// the defaults.
+/// Diagnostic bisection for the Voronoi confetti: left half of the image is
+/// genesis membership sampled DIRECTLY by pixel direction (ground truth);
+/// right half is membership as painted onto the Voronoi mesh's cells and read
+/// back through `cell_at`. If the left is coherent and the right is speckle,
+/// the mesh or its lookup is scrambling spatial data; if both speckle, the
+/// membership function itself is at fault at this sampling density.
+#[test]
+#[ignore = "diagnostic"]
+fn dump_voronoi_membership() {
+    use std::io::Write;
+
+    let seed = 42u64;
+    let budget = 160_000u32;
+    let density = iw_tectonics::genesis_density(seed, 14);
+    let mesh = iw_mesh::Mesh::build_voronoi(budget, seed, &density);
+    // Paint per-cell: density as a proxy for membership (rim-graded).
+    let per_cell: Vec<f32> = mesh.centers.iter().map(|c| density(*c)).collect();
+
+    let (w, ht) = (2048usize, 1024usize);
+    let mut buf = vec![0u8; w * ht * 3];
+    for y in 0..ht {
+        let lat = (0.5 - (y as f32 + 0.5) / ht as f32) * std::f32::consts::PI;
+        for x in 0..w {
+            let lon = ((x as f32 + 0.5) / w as f32 - 0.5) * std::f32::consts::TAU;
+            let dir = glam::Vec3::new(lat.cos() * lon.cos(), lat.cos() * lon.sin(), lat.sin());
+            let v = if x < w / 2 {
+                density(dir)
+            } else {
+                per_cell[mesh.cell_at(dir) as usize]
+            };
+            let g = (v * 255.0) as u8;
+            let i = (y * w + x) * 3;
+            buf[i] = g;
+            buf[i + 1] = g;
+            buf[i + 2] = if x == w / 2 { 255 } else { g };
+        }
+    }
+    let mut f = std::fs::File::create("/tmp/vor_membership.ppm").unwrap();
+    writeln!(f, "P6 {w} {ht} 255").unwrap();
+    f.write_all(&buf).unwrap();
+    println!("wrote /tmp/vor_membership.ppm");
+
+    // Third panel, separate file: the ACTUAL phase-1 seeding on this exact
+    // mesh, crust type read back per pixel. If this speckles while the halves
+    // above are coherent, the corruption is inside the seeding/simulation
+    // path, not the mesh or the shapes.
+    let mesh = std::sync::Arc::new(mesh);
+    let mut config = iw_core::PlanetConfig {
+        seed,
+        cell_budget: budget,
+        ..Default::default()
+    };
+    config.sanitize();
+    let mut h = Harness::new(config, std::sync::Arc::clone(&mesh));
+    let mut p = TectonicsProcess::new();
+    h.run(&mut p, Phase::CrustalFormation, 3);
+    let mut buf = vec![0u8; w * ht * 3];
+    for y in 0..ht {
+        let lat = (0.5 - (y as f32 + 0.5) / ht as f32) * std::f32::consts::PI;
+        for x in 0..w {
+            let lon = ((x as f32 + 0.5) / w as f32 - 0.5) * std::f32::consts::TAU;
+            let dir = glam::Vec3::new(lat.cos() * lon.cos(), lat.cos() * lon.sin(), lat.sin());
+            let c = h.mesh.cell_at(dir) as usize;
+            let g = if h.planet.crust_type[c] == CrustType::Continental {
+                200
+            } else {
+                30
+            };
+            let i = (y * w + x) * 3;
+            buf[i] = g;
+            buf[i + 1] = g;
+            buf[i + 2] = g;
+        }
+    }
+    let mut f = std::fs::File::create("/tmp/vor_seeded.ppm").unwrap();
+    writeln!(f, "P6 {w} {ht} 255").unwrap();
+    f.write_all(&buf).unwrap();
+    println!("wrote /tmp/vor_seeded.ppm");
+}
+
 #[test]
 #[ignore = "diagnostic"]
 fn dump_phase1_crust() {

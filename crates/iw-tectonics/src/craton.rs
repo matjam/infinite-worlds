@@ -76,6 +76,11 @@ const GAIN: f32 = 0.62;
 /// Floor on the modulated radius, as a fraction of the mean, so a deep noise
 /// trough cannot invert the cap.
 const MIN_RADIUS_FRAC: f32 = 0.35;
+/// Absolute ceiling on the outline-modulation scale, radians (~1,900 km).
+/// Cratons below this radius keep their proportional coastline character;
+/// larger landmasses get the same absolute swing instead of a proportionally
+/// monstrous one. See [`CratonShape::radius_at`].
+const OUTLINE_SCALE_CAP_RAD: f32 = 0.30;
 
 /// Fraction of the planet the craton nuclei are sized to cover in total.
 ///
@@ -205,7 +210,15 @@ impl CratonShape {
         let n = self
             .noise
             .fbm(w * OUTLINE_FREQ, self.detail_octaves, LACUNARITY, GAIN);
-        self.radius_rad * (1.0 + OUTLINE_AMP * n).max(MIN_RADIUS_FRAC)
+        // The modulation scale SATURATES in absolute angular terms: a craton's
+        // coastline character comes from swings proportional to its radius,
+        // but a supercontinent modulated proportionally would swing its
+        // boundary by over a thousand kilometres at fine-octave wavelengths —
+        // membership then alternates cell-by-cell across a fringe wider than
+        // the landmass (the shredded-confetti bug the Voronoi mesh exposed by
+        // actually resolving it).
+        let scale = self.radius_rad.min(OUTLINE_SCALE_CAP_RAD);
+        (self.radius_rad + scale * OUTLINE_AMP * n).max(self.radius_rad * MIN_RADIUS_FRAC)
     }
 
     /// Area centroid of the mask, in the local frame, by spiral quadrature over
