@@ -7,5 +7,6 @@ license.workspace = true
 [dependencies]
 iw-core.workspace = true
 iw-mesh.workspace = true
+iw-climate.workspace = true
 glam.workspace = true
 rayon.workspace = true
