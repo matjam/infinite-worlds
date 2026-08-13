@@ -133,10 +133,15 @@ mod tests {
 
     #[test]
     fn cell_counts() {
-        let mut c = PlanetConfig::default();
-        c.subdivision_level = 6;
+        let c = PlanetConfig {
+            subdivision_level: 6,
+            ..Default::default()
+        };
         assert_eq!(c.n_cells(), 40_962);
-        c.subdivision_level = 8;
+        let c = PlanetConfig {
+            subdivision_level: 8,
+            ..c
+        };
         assert_eq!(c.n_cells(), 655_362);
     }
 

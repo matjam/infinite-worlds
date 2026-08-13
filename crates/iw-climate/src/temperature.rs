@@ -61,7 +61,7 @@ pub const ZONAL_QUARTIC_WEIGHT: f32 = 0.6;
 /// cold to evaporate (evaporation halves per 10 C), so continents were arid;
 /// the -5..+5 C taiga band squeezed into a couple of degrees of latitude; ice
 /// forming from 50 deg poleward. Mixing in `sin^4` at
-/// [`ZONAL_QUARTIC_WEIGHT`] tracks the observed profile to a couple of degrees
+/// `ZONAL_QUARTIC_WEIGHT` tracks the observed profile to a couple of degrees
 /// from the equator to the pole (45 deg -> +9.5 C, 60 deg -> -6 C,
 /// 30 deg -> +21 C) while keeping both anchors exact.
 #[inline]

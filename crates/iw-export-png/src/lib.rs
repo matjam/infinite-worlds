@@ -145,8 +145,8 @@ const OCEAN_RAMP_DEPTH_M: f32 = 6000.0;
 const LAND_RAMP_HEIGHT_M: f32 = 4500.0;
 
 /// Position along the hypsometric ramp for `elev_m` relative to
-/// `sea_level_m`: `-1.0` at [`OCEAN_RAMP_DEPTH_M`] or deeper, `0.0` at the
-/// coastline, `1.0` at [`LAND_RAMP_HEIGHT_M`] or higher. Monotonically
+/// `sea_level_m`: `-1.0` at `OCEAN_RAMP_DEPTH_M` or deeper, `0.0` at the
+/// coastline, `1.0` at `LAND_RAMP_HEIGHT_M` or higher. Monotonically
 /// non-decreasing in `elev_m` for a fixed `sea_level_m`.
 pub fn hypsometric_t(elev_m: f32, sea_level_m: f32) -> f32 {
     let rel = elev_m - sea_level_m;

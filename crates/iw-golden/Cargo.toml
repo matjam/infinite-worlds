@@ -1,0 +1,24 @@
+[package]
+name = "iw-golden"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# Test-only crate: no library or binary target, just `tests/golden.rs`.
+# WP12 (IMPLEMENTATION_PLAN.md §3): end-to-end determinism, golden-planet
+# stat ranges, mass-ledger and checkpoint-resume coverage, running the real
+# pipeline in-process (the same processes `iw-headless` wires up).
+
+[dev-dependencies]
+iw-core.workspace = true
+iw-mesh.workspace = true
+iw-sim.workspace = true
+iw-tectonics.workspace = true
+iw-geology.workspace = true
+iw-climate.workspace = true
+iw-surface.workspace = true
+iw-biomes.workspace = true
+iw-store-postcard.workspace = true
+proptest.workspace = true
+tempfile = "3"

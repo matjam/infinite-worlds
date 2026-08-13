@@ -50,8 +50,8 @@
 //!    the Whittaker `T < -5` backstop) because plenty of tundra has an
 //!    annual mean above -5 C once maritime moderation is included.
 //!
-//! Whittaker core (land not caught by an override above), see [`whittaker`]
-//! for the exact thresholds.
+//! Whittaker core (land not caught by an override above), see the private
+//! `whittaker` function for the exact thresholds.
 //!
 //! # River-mouth / high-water-table proxy
 //!

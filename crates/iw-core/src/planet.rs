@@ -27,7 +27,7 @@ impl Plate {
     pub fn velocity_m_yr(&self, r: Vec3) -> Vec3 {
         let w = self.euler_pole * self.omega_rad_myr; // rad/Myr
         let v = w.cross(r.as_dvec3()); // (rad/Myr) * unit
-        // radians/Myr at Earth radius -> meters/year
+                                       // radians/Myr at Earth radius -> meters/year
         (v * iw_mesh::EARTH_RADIUS_M / 1.0e6).as_vec3()
     }
 }

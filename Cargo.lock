@@ -1370,6 +1370,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "iw-golden"
+version = "0.1.0"
+dependencies = [
+ "iw-biomes",
+ "iw-climate",
+ "iw-core",
+ "iw-geology",
+ "iw-mesh",
+ "iw-sim",
+ "iw-store-postcard",
+ "iw-surface",
+ "iw-tectonics",
+ "proptest",
+ "tempfile",
+]
+
+[[package]]
 name = "iw-headless"
 version = "0.1.0"
 dependencies = [
