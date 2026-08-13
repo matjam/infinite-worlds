@@ -1,0 +1,12 @@
+[package]
+name = "iw-mesh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+glam.workspace = true
+rayon.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

@@ -1,0 +1,11 @@
+[package]
+name = "iw-biomes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+iw-core.workspace = true
+iw-mesh.workspace = true
+glam.workspace = true
+rayon.workspace = true

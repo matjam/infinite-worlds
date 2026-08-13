@@ -1,0 +1,16 @@
+[package]
+name = "iw-tectonics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+iw-core.workspace = true
+iw-mesh.workspace = true
+glam.workspace = true
+rand.workspace = true
+rand_pcg.workspace = true
+rayon.workspace = true
+rustc-hash.workspace = true
+log.workspace = true
+smallvec.workspace = true

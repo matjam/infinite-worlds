@@ -1,0 +1,22 @@
+[package]
+name = "iw-headless"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+iw-core.workspace = true
+iw-mesh.workspace = true
+iw-sim.workspace = true
+iw-tectonics.workspace = true
+iw-geology.workspace = true
+iw-climate.workspace = true
+iw-surface.workspace = true
+iw-biomes.workspace = true
+iw-store-postcard.workspace = true
+iw-export-png.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+env_logger.workspace = true
+log.workspace = true

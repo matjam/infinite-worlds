@@ -1,0 +1,12 @@
+[package]
+name = "iw-render-vulkan"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+iw-core.workspace = true
+iw-mesh.workspace = true
+glam.workspace = true
+anyhow.workspace = true
+log.workspace = true
