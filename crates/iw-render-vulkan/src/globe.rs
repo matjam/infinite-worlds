@@ -214,6 +214,10 @@ pub struct GlobeParams {
     pub exaggeration: f32,
     /// Constant radial offset added to every vertex, metres.
     pub base_offset_m: f32,
+    /// Sea level, metres — the fragment shader's shoreline-crinkle reference
+    /// (rides in the push-constant slot Mercator uses for depth normalising,
+    /// so the crinkle is globe-only).
+    pub sea_level_m: f32,
     pub radius_km: f32,
     pub mode: ViewMode,
     /// Mercator view-centre longitude, radians.
@@ -245,6 +249,7 @@ impl Default for GlobeParams {
             camera_pos_km: Vec3::ZERO,
             exaggeration: 1.0,
             base_offset_m: 0.0,
+            sea_level_m: 0.0,
             radius_km: iw_mesh::EARTH_RADIUS_KM,
             mode: ViewMode::Globe,
             center_lon_rad: 0.0,
@@ -852,7 +857,12 @@ impl GlobeRenderer {
             params: [
                 params.radius_km,
                 params.base_offset_m,
-                ELEV_NORM_M,
+                // Globe: sea level for the fragment shoreline crinkle.
+                // Mercator: the depth normaliser its vertex branch needs.
+                match params.mode {
+                    ViewMode::Globe => params.sea_level_m,
+                    ViewMode::Mercator => ELEV_NORM_M,
+                },
                 params.center_lon_rad,
             ],
             sun: [

@@ -14,6 +14,7 @@ mod inspector;
 mod layers;
 mod panel;
 mod pick;
+mod presets;
 mod rivers;
 mod scrubber;
 mod store;
@@ -1365,6 +1366,12 @@ impl App {
             },
             exaggeration,
             base_offset_m: 0.0,
+            sea_level_m: self
+                .historic
+                .as_ref()
+                .map(|s| s.sea_level_m)
+                .or_else(|| self.view.as_ref().map(|v| v.sea_level_m))
+                .unwrap_or(0.0),
             radius_km: EARTH_RADIUS_KM,
             mode: self.camera.mode,
             center_lon_rad: self.camera.mercator_center.x,

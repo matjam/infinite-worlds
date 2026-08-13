@@ -53,6 +53,12 @@ layout(push_constant) uniform Push {
     uvec4 flags;         // x = 0 globe / 1 mercator, y = 1 when beauty shading is on
 } pc;
 
+// Fraction of the three corner cells that are LAND (0, 1/3, 2/3 or 1).
+// Interpolated, its 0.5 contour runs mid-way between land and water cell
+// centres — a scale-free, sub-cell shoreline for the fragment stage to
+// perturb (see the crinkle block in globe.frag).
+layout(location = 5) out float v_landness;
+
 layout(location = 0) out vec3 v_normal;
 // Not flat: in the beauty view a corner averages the albedo of the cells that
 // meet there *and share its surface kind*, which takes the honeycomb out of
@@ -90,6 +96,9 @@ void main() {
 
     vec3 n = normalize(in_pos);
     v_sphere = n;
+    v_landness = ((kind_of(cd.material) < 0.5 ? 1.0 : 0.0)
+                + (kind_of(cy.material) < 0.5 ? 1.0 : 0.0)
+                + (kind_of(cz.material) < 0.5 ? 1.0 : 0.0)) * (1.0 / 3.0);
     vec4 mat = unpackUnorm4x8(cd.material);
     float kind = floor(mat.x * 255.0 + 0.5);
     v_mat = vec4(kind, mat.y, mat.z, mat.w);

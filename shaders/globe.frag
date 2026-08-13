@@ -18,6 +18,9 @@ layout(location = 3) in vec3 v_sphere;
 // x = surface kind (0 land, 1 ocean, 2 lake), y = ocean depth 0..1,
 // z = ice fraction 0..1, w = reserved.
 layout(location = 4) flat in vec4 v_mat;
+// Interpolated land fraction of the cells meeting at each corner; its 0.5
+// contour is the sub-cell shoreline.
+layout(location = 5) in float v_landness;
 
 layout(location = 0) out vec4 o_color;
 
@@ -62,6 +65,34 @@ void main() {
     float depth_t = v_mat.y;
     float ice_t = v_mat.z;
     bool water = kind > 0.5;
+
+    // --- Shoreline crinkle (globe beauty only). `v_landness` interpolates
+    // the corner cells' land fraction, so its 0.5 contour runs mid-way
+    // between land and water cell centres — re-drawing the land/water
+    // decision at a noise-perturbed offset of that contour dissolves the
+    // polygon edges into a wandering shoreline. The noise amplitude is below
+    // 0.5 by construction, so open ocean (landness 0) and inland (landness 1)
+    // can never flip. Works for sea and lake shores alike — the field is
+    // kind-based, no elevations involved.
+    // Lake fragments are exempt: a small lake's landness never drops below
+    // ~2/3 (its corners blend the surrounding land), so the contour would
+    // paint the whole lake as beach.
+    if (ice_t < 0.5 && kind < 1.5) {
+        float crinkled = v_landness - 0.5 + shore_noise(S) * SHORE_NOISE_AMP;
+        if (!water && crinkled < 0.0) {
+            // The coast wandered over this land fragment: shelf water.
+            albedo = SHELF_ALBEDO;
+            water = true;
+            depth_t = 0.0;
+        } else if (water && crinkled > 0.0) {
+            // Emergent fringe on the water side: beach sand.
+            albedo = SAND_ALBEDO;
+            water = false;
+        }
+        // A pale band right at the interface reads as surf and wet sand.
+        float foam = 1.0 - smoothstep(0.0, FOAM_BAND, abs(crinkled));
+        albedo = mix(albedo, FOAM_ALBEDO, foam * 0.4);
+    }
 
     // Sphere-level day mask: relief may brighten a slope, but never on the
     // night side.

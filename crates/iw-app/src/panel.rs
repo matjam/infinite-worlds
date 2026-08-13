@@ -151,6 +151,25 @@ pub fn show(
             }
 
             ui.separator();
+            ui.horizontal(|ui| {
+                ui.label("Preset");
+                egui::ComboBox::from_id_salt("world-preset")
+                    .selected_text("choose\u{2026}")
+                    .show_ui(ui, |ui| {
+                        for preset in crate::presets::PRESETS {
+                            if ui
+                                .selectable_label(false, preset.name)
+                                .on_hover_text(preset.blurb)
+                                .clicked()
+                            {
+                                preset.apply(&mut state.config);
+                            }
+                        }
+                    });
+            });
+            ui.small("a preset rewrites the sliders below; tweak freely before Apply");
+
+            ui.separator();
             let mut budget = state.config.cell_budget;
             ui.add(
                 egui::Slider::new(&mut budget, 10_000..=3_000_000)

@@ -116,6 +116,51 @@ const float CLOUD_SOFT = 0.34;
 /// Ambient floor of the cloud lighting (clouds are bright even in shadow).
 const float CLOUD_AMBIENT = 0.22;
 
+// --- shoreline crinkle ------------------------------------------------------
+
+/// Amplitude of the noise that offsets the landness contour. MUST stay below
+/// 0.5: that is what makes open ocean and deep inland unflippable.
+const float SHORE_NOISE_AMP = 0.26;
+/// Half-width of the surf/wet-sand band, in landness units (fraction of the
+/// land-to-water blend zone, so it scales with cell size).
+const float FOAM_BAND = 0.05;
+/// Shelf water a drowned coastal fragment turns into (linear).
+const vec3 SHELF_ALBEDO = vec3(0.045, 0.17, 0.26);
+/// Sand an emergent water fragment turns into (linear).
+const vec3 SAND_ALBEDO = vec3(0.50, 0.40, 0.22);
+/// Surf line tint (linear).
+const vec3 FOAM_ALBEDO = vec3(0.62, 0.68, 0.68);
+
+float shore_hash(vec3 p) {
+    p = fract(p * 0.3183099 + vec3(0.1, 0.2, 0.3));
+    p *= 17.0;
+    return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+}
+
+float shore_vnoise(vec3 p) {
+    vec3 i = floor(p);
+    vec3 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    float c000 = shore_hash(i);
+    float c100 = shore_hash(i + vec3(1, 0, 0));
+    float c010 = shore_hash(i + vec3(0, 1, 0));
+    float c110 = shore_hash(i + vec3(1, 1, 0));
+    float c001 = shore_hash(i + vec3(0, 0, 1));
+    float c101 = shore_hash(i + vec3(1, 0, 1));
+    float c011 = shore_hash(i + vec3(0, 1, 1));
+    float c111 = shore_hash(i + vec3(1, 1, 1));
+    return mix(mix(mix(c000, c100, f.x), mix(c010, c110, f.x), f.y),
+               mix(mix(c001, c101, f.x), mix(c011, c111, f.x), f.y), f.z);
+}
+
+/// Two octaves of value noise on the unit sphere, roughly [-1, 1]. The base
+/// frequency puts the crinkle wavelength around 30 km — below cell size at
+/// any budget, so polygon edges dissolve.
+float shore_noise(vec3 s) {
+    float n = shore_vnoise(s * 1400.0) * 0.65 + shore_vnoise(s * 3800.0) * 0.35;
+    return n * 2.0 - 1.0;
+}
+
 // --- mercator --------------------------------------------------------------
 
 /// Fixed hillshade light for the flat map: from the top left, fairly high.
