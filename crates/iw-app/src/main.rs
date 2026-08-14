@@ -339,9 +339,19 @@ impl App {
     }
 
     fn init(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
-        let attrs = Window::default_attributes()
+        let mut attrs = Window::default_attributes()
             .with_title("Infinite Worlds")
             .with_inner_size(LogicalSize::new(1600.0, 900.0));
+        // Wayland app_id (and X11 WM_CLASS): without it the window has an
+        // empty class and compositor window rules (float, opacity) never
+        // match it.
+        #[cfg(target_os = "linux")]
+        {
+            use iw_render_vulkan::winit::platform::wayland::WindowAttributesExtWayland;
+            use iw_render_vulkan::winit::platform::x11::WindowAttributesExtX11;
+            attrs = WindowAttributesExtWayland::with_name(attrs, "infinite-worlds", "");
+            attrs = WindowAttributesExtX11::with_name(attrs, "infinite-worlds", "Infinite Worlds");
+        }
         let window = Arc::new(event_loop.create_window(attrs)?);
         let size = window.inner_size();
         self.surface_size = (size.width.max(1), size.height.max(1));

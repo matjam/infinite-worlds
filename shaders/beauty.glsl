@@ -144,9 +144,9 @@ const float SHORE_NOISE_AMP = 0.26;
 /// Beach width, kilometres — ABSOLUTE, not a fraction of the cell. A beach
 /// band that scaled with cell size painted 30 km sand fields along every
 /// coarse-budget coast.
-const float SAND_WIDTH_KM = 4.0;
+const float SAND_WIDTH_KM = 2.5;
 /// Surf line width, kilometres (absolute, same reason).
-const float FOAM_WIDTH_KM = 1.5;
+const float FOAM_WIDTH_KM = 1.0;
 /// Shelf water a drowned coastal fragment turns into (linear).
 const vec3 SHELF_ALBEDO = vec3(0.045, 0.17, 0.26);
 /// Mid-depth open-ocean tone the shelf band deepens toward (linear, matched

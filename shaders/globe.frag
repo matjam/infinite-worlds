@@ -71,12 +71,18 @@ void main() {
     // cells never gets there (its corners blend the surrounding land), which
     // is exactly the case where the contour would beach the whole lake.
     bool lake_frag = kind > 1.5;
+    // Depth is corner-interpolated, so its gradient kinks at every triangle
+    // seam — visible as faint angular wedges in shallow water (Mach bands).
+    // A little coherent noise on the depth hides the creases.
+    float depth_dither =
+        (shore_vnoise(S * (2.0 / max(uintBitsToFloat(pc.flags.z), 1e-4))) - 0.5) * 0.06;
+    float depth_soft = clamp(v_depth + depth_dither * clamp(v_depth * 8.0, 0.0, 1.0), 0.0, 1.0);
     // Ocean fragments take the continuous per-fragment bathymetry ramp,
     // detail-modulated by the cell's baked colour so the water keeps its
     // grain. This replaces the flat per-cell ocean colour that stuck out as
     // pale angular plates wherever shallow cells clustered.
     if (water && !lake_frag) {
-        vec3 ramp = ocean_ramp(v_depth);
+        vec3 ramp = ocean_ramp(depth_soft);
         float lum = dot(albedo, vec3(0.4, 0.7, 0.4));
         float ref_lum = dot(ramp, vec3(0.4, 0.7, 0.4));
         float grain = clamp(lum / max(ref_lum, 1e-4), 0.8, 1.25);
@@ -117,10 +123,10 @@ void main() {
             // the polygon edge — that is what makes the seam vanish.
             float deep = smoothstep(0.02, 0.15, -crinkled);
             albedo = lakeside ? mix(LAKE_NEAR_ALBEDO, LAKE_DEEP_ALBEDO, deep)
-                              : ocean_ramp(v_depth * deep);
+                              : ocean_ramp(depth_soft * deep);
             kind = lakeside ? 2.0 : 1.0;
             water = true;
-            depth_t = v_depth * deep;
+            depth_t = depth_soft * deep;
         } else if (water && crinkled > 0.0) {
             // Emergent fringe on the water side: it is LAND, so it shows the
             // neighbouring land cells' own vegetation/soil albedo — painting
