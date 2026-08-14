@@ -71,9 +71,13 @@ void main() {
         float crinkled = v_landlake.x - 0.5 + shore_noise(S) * SHORE_NOISE_AMP;
         if (!water && crinkled < 0.0) {
             // The shore wandered over this land fragment: shallow water,
-            // coloured for whichever kind of water the neighbours hold.
+            // coloured for whichever kind of water the neighbours hold. The
+            // sea side DEEPENS seaward toward the open-ocean tone, so the
+            // band shelves off into the neighbouring ocean cells instead of
+            // ending as a flat pale terrace at the polygon edge.
             bool lakey = v_landlake.y > 0.2;
-            albedo = lakey ? LAKE_NEAR_ALBEDO : SHELF_ALBEDO;
+            float deep = smoothstep(0.05, 0.45, -crinkled);
+            albedo = lakey ? LAKE_NEAR_ALBEDO : mix(SHELF_ALBEDO, OCEAN_MID_ALBEDO, deep);
             kind = lakey ? 2.0 : 1.0;
             water = true;
             depth_t = 0.0;

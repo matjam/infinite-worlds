@@ -507,8 +507,10 @@ fn transient_flags_are_rewritten_each_step() {
     // few at convergent overlaps or ridge gaps. Transient bits must still be
     // gone; the persistent bit must survive at (nearly) full strength.
     let survived = h.flagged(cell_flags::SUTURE);
+    // 0.96: the continental dispersal kick makes the hand-off era livelier,
+    // and a livelier remap eats slightly more sutures at overlaps.
     assert!(
-        survived as f64 >= h.planet.n_cells() as f64 * 0.98,
+        survived as f64 >= h.planet.n_cells() as f64 * 0.96,
         "SUTURE should persist through a step (survived {survived} of {})",
         h.planet.n_cells()
     );

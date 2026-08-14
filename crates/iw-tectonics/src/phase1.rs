@@ -35,6 +35,11 @@ const SEED_PLATE_SPEED_M_YR: f32 = 0.04;
 /// Gentler than a live rift's separation (0.07): this is a nudge for slab
 /// pull to amplify, not an imposed breakup.
 const HANDOFF_SPLIT_KICK_M_YR: f32 = 0.03;
+/// Radial push given to every continental-share plate away from Pangaea's
+/// centre of mass at the hand-off, m/yr — the coherent break-up bias that
+/// keeps fragments from starting out clumped. Comparable to a live rift's
+/// separation; slab pull and collisions take over from there.
+const CONTINENTAL_DISPERSAL_KICK_M_YR: f32 = 0.05;
 /// Hard ceiling on the initial plate count (safety, not a target).
 const HANDOFF_MAX_PLATES: usize = 24;
 /// Meander amplitude of a hand-off cut, in units of the axis coordinate
@@ -339,6 +344,35 @@ pub(crate) fn partition_into_plates(
         plates[ai].rift_born_myr = planet.time_myr;
         plates[bi].rift_partner = Some(a);
         plates[bi].rift_born_myr = planet.time_myr;
+    }
+
+    // Continental dispersal: every plate carrying a real share of the
+    // supercontinent also gets a push AWAY from Pangaea's centre of mass —
+    // a coherent radial break-up bias, so the fragments start by separating
+    // instead of milling about clumped together. Collisions later are still
+    // free to happen; this only sets the opening act.
+    let total_cont: f64 = cont_mass.iter().sum();
+    if total_cont > 0.0 {
+        let pangaea: DVec3 = (0..np)
+            .fold(DVec3::ZERO, |acc, i| {
+                acc + centroid[i].normalize_or(DVec3::ZERO) * cont_mass[i]
+            })
+            .normalize_or(DVec3::Z);
+        let pv = pangaea.as_vec3();
+        for i in 0..np {
+            if cont_mass[i] < 0.02 * total_cont {
+                continue;
+            }
+            let here = centroid[i].normalize_or(DVec3::Z).as_vec3();
+            let w = plates[i].euler_pole * plates[i].omega_rad_myr
+                + omega_for_velocity(
+                    here,
+                    tangent_toward(here, pv) * -CONTINENTAL_DISPERSAL_KICK_M_YR,
+                );
+            let omega = w.length();
+            plates[i].euler_pole = if omega > 1e-12 { w / omega } else { DVec3::Z };
+            plates[i].omega_rad_myr = omega;
+        }
     }
 
     planet.plate_id.copy_from_slice(&scratch.u16a);

@@ -146,6 +146,9 @@ const float SHORE_NOISE_AMP = 0.26;
 const float FOAM_BAND = 0.05;
 /// Shelf water a drowned coastal fragment turns into (linear).
 const vec3 SHELF_ALBEDO = vec3(0.045, 0.17, 0.26);
+/// Mid-depth open-ocean tone the shelf band deepens toward (linear, matched
+/// to the beauty ocean ramp so the band meets the neighbouring ocean cells).
+const vec3 OCEAN_MID_ALBEDO = vec3(0.006, 0.06, 0.24);
 /// Lake-shore water a drowned fragment turns into next to a lake (linear,
 /// matched to the lake shallow palette).
 const vec3 LAKE_NEAR_ALBEDO = vec3(0.06, 0.28, 0.45);
