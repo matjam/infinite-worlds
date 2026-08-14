@@ -152,6 +152,22 @@ const vec3 SHELF_ALBEDO = vec3(0.045, 0.17, 0.26);
 /// Mid-depth open-ocean tone the shelf band deepens toward (linear, matched
 /// to the beauty ocean ramp so the band meets the neighbouring ocean cells).
 const vec3 OCEAN_MID_ALBEDO = vec3(0.006, 0.06, 0.24);
+/// Abyssal tone (linear).
+const vec3 OCEAN_DEEP_ALBEDO = vec3(0.004, 0.013, 0.09);
+/// Depth-ramp position where the shelf tone has fully given way to mid.
+const float OCEAN_SHELF_END_T = 0.30;
+
+/// Continuous ocean albedo from the corner-blended depth ramp — evaluated
+/// per FRAGMENT. A per-cell ocean colour made every cluster of shallow
+/// cells a flat pale polygon against its deep neighbours; this makes the
+/// whole ocean one smooth bathymetric gradient.
+vec3 ocean_ramp(float depth_t) {
+    if (depth_t < OCEAN_SHELF_END_T) {
+        return mix(SHELF_ALBEDO, OCEAN_MID_ALBEDO, depth_t / OCEAN_SHELF_END_T);
+    }
+    return mix(OCEAN_MID_ALBEDO, OCEAN_DEEP_ALBEDO,
+               (depth_t - OCEAN_SHELF_END_T) / (1.0 - OCEAN_SHELF_END_T));
+}
 /// Lake-shore water a drowned fragment turns into next to a lake (linear,
 /// matched to the lake shallow palette).
 const vec3 LAKE_NEAR_ALBEDO = vec3(0.06, 0.28, 0.45);

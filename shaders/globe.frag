@@ -71,6 +71,17 @@ void main() {
     // cells never gets there (its corners blend the surrounding land), which
     // is exactly the case where the contour would beach the whole lake.
     bool lake_frag = kind > 1.5;
+    // Ocean fragments take the continuous per-fragment bathymetry ramp,
+    // detail-modulated by the cell's baked colour so the water keeps its
+    // grain. This replaces the flat per-cell ocean colour that stuck out as
+    // pale angular plates wherever shallow cells clustered.
+    if (water && !lake_frag) {
+        vec3 ramp = ocean_ramp(v_depth);
+        float lum = dot(albedo, vec3(0.4, 0.7, 0.4));
+        float ref_lum = dot(ramp, vec3(0.4, 0.7, 0.4));
+        float grain = clamp(lum / max(ref_lum, 1e-4), 0.8, 1.25);
+        albedo = ramp * grain;
+    }
     if (ice_t < 0.5 && (!lake_frag || v_landlake.x < 0.55)) {
         float pitch = max(uintBitsToFloat(pc.flags.z), 1e-4);
         float freq = 5.5 / pitch;
