@@ -68,7 +68,9 @@ void main() {
     // is exactly the case where the contour would beach the whole lake.
     bool lake_frag = kind > 1.5;
     if (ice_t < 0.5 && (!lake_frag || v_landlake.x < 0.55)) {
-        float crinkled = v_landlake.x - 0.5 + shore_noise(S) * SHORE_NOISE_AMP;
+        float pitch = max(uintBitsToFloat(pc.flags.z), 1e-4);
+        float freq = 5.5 / pitch;
+        float crinkled = v_landlake.x - 0.5 + shore_noise(S, freq) * SHORE_NOISE_AMP;
         if (!water && crinkled < 0.0) {
             // The shore wandered over this land fragment: shallow water,
             // coloured for whichever kind of water the neighbours hold. The

@@ -179,11 +179,13 @@ float shore_vnoise(vec3 p) {
                mix(mix(c001, c101, f.x), mix(c011, c111, f.x), f.y), f.z);
 }
 
-/// Two octaves of value noise on the unit sphere, roughly [-1, 1]. The base
-/// frequency puts the crinkle wavelength around 30 km — below cell size at
-/// any budget, so polygon edges dissolve.
-float shore_noise(vec3 s) {
-    float n = shore_vnoise(s * 1400.0) * 0.65 + shore_vnoise(s * 3800.0) * 0.35;
+/// Two octaves of value noise on the unit sphere, roughly [-1, 1]. `freq` is
+/// chosen per planet from the MEAN CELL PITCH (wavelength ~ one cell), so a
+/// coarse world's shoreline wanders in one or two calm lobes per cell edge
+/// instead of dissolving into froth — a fixed km-scale frequency turned every
+/// 30k-budget coast into speckle.
+float shore_noise(vec3 s, float freq) {
+    float n = shore_vnoise(s * freq) * 0.65 + shore_vnoise(s * (freq * 2.6)) * 0.35;
     return n * 2.0 - 1.0;
 }
 

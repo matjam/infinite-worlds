@@ -1393,6 +1393,11 @@ impl App {
                 (now - self.start).as_secs_f32(),
             ),
             cloud_seed: (self.config.seed % 977) as f32,
+            cell_pitch_rad: self
+                .mesh
+                .as_ref()
+                .map(|m| (4.0 * std::f32::consts::PI / m.n_cells() as f32).sqrt())
+                .unwrap_or(0.016),
         };
 
         let renderer = self.renderer.as_mut().expect("renderer");

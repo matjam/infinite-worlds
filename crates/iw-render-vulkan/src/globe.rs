@@ -240,6 +240,10 @@ pub struct GlobeParams {
     pub cloud_phase_rad: f32,
     /// Seed offset for the cloud noise, so two planets get different weather.
     pub cloud_seed: f32,
+    /// Mean cell pitch as an angle on the unit sphere, radians. The shoreline
+    /// crinkle scales its noise wavelength by this, so coarse worlds get a
+    /// calm wander instead of froth.
+    pub cell_pitch_rad: f32,
 }
 
 impl Default for GlobeParams {
@@ -262,6 +266,7 @@ impl Default for GlobeParams {
             cloud_opacity: 0.0,
             cloud_phase_rad: 0.0,
             cloud_seed: 0.0,
+            cell_pitch_rad: 0.016,
         }
     }
 }
@@ -877,7 +882,7 @@ impl GlobeRenderer {
                     ViewMode::Mercator => 1,
                 },
                 params.beauty as u32,
-                0,
+                params.cell_pitch_rad.to_bits(),
                 0,
             ],
         };
