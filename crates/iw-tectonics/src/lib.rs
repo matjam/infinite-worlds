@@ -159,7 +159,7 @@ pub struct TectonicsProcess {
     /// fingerprint: the crustal-formation era stamps continent progressively
     /// (cores first), so it needs this every step, and the fBm behind it is
     /// too expensive to recompute 200 times.
-    genesis_members: Option<(u64, Vec<Option<(u16, f32)>>)>,
+    genesis_members: Option<(u64, GenesisMembers)>,
     scratch: Scratch,
 }
 
@@ -184,6 +184,10 @@ impl TectonicsProcess {
 /// Quantities derived from the mesh and the planet seed; rebuilt when either
 /// changes. Nothing here is simulation *state* — every field is a pure function
 /// of `(mesh, seed)`, so rebuilding it in a fresh process instance is exact.
+/// Per-cell genesis membership: `(landmass id, radial f)` for continental
+/// cells, `None` for open ocean.
+pub(crate) type GenesisMembers = Vec<Option<(u16, f32)>>;
+
 pub(crate) struct MeshCache {
     /// Seed the seed-dependent fields below were built for.
     pub(crate) seed: u64,
