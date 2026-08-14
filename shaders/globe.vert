@@ -63,6 +63,9 @@ layout(location = 5) out vec2 v_landlake;
 // per-cell depth stamped shallow shelf cells as hard pale plates against
 // their deep neighbours.
 layout(location = 6) out float v_depth;
+// Corner-blended albedo of the LAND cells only: what an emergent water-side
+// fragment shows (its own vegetation/soil), instead of an invented material.
+layout(location = 7) out vec3 v_land_color;
 
 layout(location = 0) out vec3 v_normal;
 // Not flat: in the beauty view a corner averages the albedo of the cells that
@@ -111,6 +114,12 @@ void main() {
         if (kb > 0.5) { dsum += unpackUnorm4x8(cy.material).y; dn += 1.0; }
         if (kc > 0.5) { dsum += unpackUnorm4x8(cz.material).y; dn += 1.0; }
         v_depth = dn > 0.0 ? dsum / dn : 0.0;
+        vec3 lsum = vec3(0.0);
+        float lnum = 0.0;
+        if (ka < 0.5) { lsum += unpackUnorm4x8(cd.color_rgba8).rgb; lnum += 1.0; }
+        if (kb < 0.5) { lsum += unpackUnorm4x8(cy.color_rgba8).rgb; lnum += 1.0; }
+        if (kc < 0.5) { lsum += unpackUnorm4x8(cz.color_rgba8).rgb; lnum += 1.0; }
+        v_land_color = lnum > 0.0 ? lsum / lnum : unpackUnorm4x8(cd.color_rgba8).rgb;
         v_landlake = vec2((ka < 0.5 ? 1.0 : 0.0) + (kb < 0.5 ? 1.0 : 0.0)
                               + (kc < 0.5 ? 1.0 : 0.0),
                           (ka > 1.5 ? 1.0 : 0.0) + (kb > 1.5 ? 1.0 : 0.0)

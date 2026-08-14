@@ -23,6 +23,7 @@ layout(location = 4) flat in vec4 v_mat;
 // y = lake fraction (colours the water a drowned fragment turns into).
 layout(location = 5) in vec2 v_landlake;
 layout(location = 6) in float v_depth;
+layout(location = 7) in vec3 v_land_color;
 
 layout(location = 0) out vec4 o_color;
 
@@ -73,6 +74,12 @@ void main() {
     if (ice_t < 0.5 && (!lake_frag || v_landlake.x < 0.55)) {
         float pitch = max(uintBitsToFloat(pc.flags.z), 1e-4);
         float freq = 5.5 / pitch;
+        // Landness units per kilometre: the 0..1 landness blend spans about
+        // one cell width. Beach and surf are ABSOLUTE widths converted into
+        // this space, so they stay a few km at any budget.
+        float cell_km = max(pitch * 6371.0, 1.0);
+        float sand_band = SAND_WIDTH_KM / cell_km;
+        float foam_band = FOAM_WIDTH_KM / cell_km;
         float crinkled = v_landlake.x - 0.5 + shore_noise(S, freq) * SHORE_NOISE_AMP;
         if (!water && crinkled < 0.0) {
             // The shore wandered over this land fragment: shallow water,
@@ -87,13 +94,18 @@ void main() {
             water = true;
             depth_t = 0.0;
         } else if (water && crinkled > 0.0) {
-            // Emergent fringe on the water side: beach sand.
-            albedo = SAND_ALBEDO;
+            // Emergent fringe on the water side: it is LAND, so it shows the
+            // neighbouring land cells' own vegetation/soil albedo — painting
+            // it wall-to-wall sand built km-wide beach fields at every coast.
+            albedo = to_linear(v_land_color);
             water = false;
         }
-        // A pale band right at the interface reads as surf and wet sand —
-        // kept subtle on lakes, whose calm shores have no surf line.
-        float foam = 1.0 - smoothstep(0.0, FOAM_BAND, abs(crinkled));
+        // A narrow beach on the land side of the waterline, then a thin surf
+        // line right at it — both a few km, whatever the cell size.
+        if (!water && crinkled < sand_band) {
+            albedo = mix(SAND_ALBEDO, albedo, smoothstep(0.3, 1.0, crinkled / sand_band));
+        }
+        float foam = 1.0 - smoothstep(0.0, foam_band, abs(crinkled));
         float surf = (lake_frag || v_landlake.y > 0.2) ? 0.18 : 0.4;
         albedo = mix(albedo, FOAM_ALBEDO, foam * surf);
     }
