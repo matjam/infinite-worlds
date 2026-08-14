@@ -344,8 +344,12 @@ pub fn beauty_color(cell: &BeautyCell) -> [u8; 4] {
 /// rendering them with the lake palette and a polygon outline stamped hard
 /// pale plates all over otherwise organic coastlines. Treat them as sea.
 pub fn is_lagoon(cell: &BeautyCell) -> bool {
-    cell.lake_depth_m >= LAKE_MIN_M
-        && cell.elev_m + cell.lake_depth_m - cell.sea_level_m < LAGOON_MAX_ABOVE_SEA_M
+    // BED-based, not surface-based: the hydrology can fill an offshore bank
+    // (bed a few metres above sea) with a deep "lake" whose surface clears
+    // the old surface-height test — leaving a lake-classified cell in open
+    // ocean, rendered as a flat pale polygon. If the bed is at sea level,
+    // it is sea, however deep the filled column.
+    cell.lake_depth_m >= LAKE_MIN_M && cell.elev_m - cell.sea_level_m < LAGOON_MAX_ABOVE_SEA_M
 }
 
 // --- shading ---------------------------------------------------------------
@@ -434,9 +438,10 @@ pub fn shading(
         .into_par_iter()
         .map(|i| {
             let lake = lake_depth_m.get(i).copied().unwrap_or(0.0);
-            let surface = elev_m[i] + lake;
-            if lake > 0.0 && surface - sea_level_m >= LAGOON_MAX_ABOVE_SEA_M {
-                surface
+            if lake > 0.0 && elev_m[i] - sea_level_m >= LAGOON_MAX_ABOVE_SEA_M {
+                // A genuine inland lake (bed above the lagoon window)
+                // displays at its filled surface.
+                elev_m[i] + lake
             } else {
                 // Land, sea, and sea-level lagoons all use the sea clamp.
                 display_elevation(elev_m[i], sea_level_m)
@@ -455,7 +460,7 @@ pub fn shading(
     let is_water = |i: usize| {
         let lake = lake_depth_m.get(i).copied().unwrap_or(0.0);
         elev_m[i] < sea_level_m
-            || (lake >= LAKE_MIN_M && elev_m[i] + lake - sea_level_m < LAGOON_MAX_ABOVE_SEA_M)
+            || (lake >= LAKE_MIN_M && elev_m[i] - sea_level_m < LAGOON_MAX_ABOVE_SEA_M)
     };
     let mut coast = vec![0.0f32; n];
     let mut ring: Vec<u32> = Vec::new();
@@ -492,7 +497,7 @@ pub fn shading(
     // exists anywhere for the interpolation to expose. Land stays clamped
     // at 1.0 to anchor the shoreline.
     let mut scratch_field = coast.clone();
-    for _ in 0..3 {
+    for _ in 0..6 {
         for i in 0..n {
             if !is_water(i) {
                 continue;
@@ -522,7 +527,7 @@ pub fn shading(
         })
         .collect();
     let mut scratch_field = depth.clone();
-    for _ in 0..2 {
+    for _ in 0..4 {
         for i in 0..n {
             if !is_water(i) {
                 continue;

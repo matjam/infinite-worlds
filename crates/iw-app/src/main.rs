@@ -675,9 +675,14 @@ impl App {
                 _ => renderer.update_cells(&view.cells.elevation_m, &colors)?,
             }
             // Rivers ride on every layer (they are data too), rebuilt with
-            // each snapshot from the drainage graph.
+            // each snapshot from the drainage graph. IW_NO_RIVERS=1 disables
+            // the pass entirely (artifact isolation).
             if let Some(mesh) = mesh.as_ref() {
-                let ribbons = rivers::build(mesh, &view.cells, view.sea_level_m);
+                let ribbons = if std::env::var_os("IW_NO_RIVERS").is_some() {
+                    Vec::new()
+                } else {
+                    rivers::build(mesh, &view.cells, view.sea_level_m)
+                };
                 renderer.set_rivers(&ribbons)?;
             }
             self.cell_updates += 1;

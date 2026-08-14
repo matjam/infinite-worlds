@@ -154,17 +154,29 @@ fn emit_strip(
     let mut pts: Vec<Vec3> = Vec::with_capacity(path.len());
     let mut node_elev: Vec<f32> = Vec::with_capacity(path.len());
     let mut node_t: Vec<f32> = Vec::with_capacity(path.len());
-    for &c in path {
-        let p = mesh.centers[c];
+    for (k, &c) in path.iter().enumerate() {
+        // A terminal WATER cell is the mouth: end the strip at the shared
+        // boundary (midpoint to the previous land cell), not at the water
+        // cell's centre — that centre can sit 100 km offshore, and the last
+        // segment drew a straight spike out to sea.
+        let lake = cells.lake_depth_m.get(c).copied().unwrap_or(0.0);
+        let terminal_water =
+            k + 1 == path.len() && (cells.elevation_m[c] < sea_level_m || lake > 0.0);
+        let p = if terminal_water && !pts.is_empty() {
+            (mesh.centers[c] + *pts.last().expect("non-empty")).normalize()
+        } else {
+            mesh.centers[c]
+        };
         if pts.last().is_none_or(|l| (*l - p).length_squared() > 1e-12) {
             pts.push(p);
             // Water-surface elevation: mouths meet the sea at the waterline,
             // and a final lake cell meets the LAKE surface (bed + depth)
             // instead of diving under it.
-            node_elev.push(
-                (cells.elevation_m[c] + cells.lake_depth_m.get(c).copied().unwrap_or(0.0))
-                    .max(sea_level_m),
-            );
+            node_elev.push(if terminal_water {
+                (cells.elevation_m[c] + lake).max(sea_level_m)
+            } else {
+                (cells.elevation_m[c] + lake).max(sea_level_m)
+            });
             node_t.push(ramp(cells.water_flux_m3_yr[c]));
         }
     }
