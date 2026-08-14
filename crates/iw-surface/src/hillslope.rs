@@ -36,6 +36,15 @@ pub const WEATHERING_REF_PRECIP_MM: f32 = 1000.0;
 /// Half-width of the freeze-thaw temperature window, °C.
 pub const FREEZE_THAW_WIDTH_C: f32 = 5.0;
 
+/// Height above sea level below which surf attacks the coast, metres.
+pub const WAVE_ATTACK_M: f32 = 50.0;
+/// Extra weathering at the waterline itself, as a multiple of the base rate
+/// (tapers linearly to zero at [`WAVE_ATTACK_M`]). This is what heals rifted
+/// margins: without it, cell-striped coasts hovering at sea level persisted
+/// for the whole run — submerged cells never weather and emergent stubs
+/// eroded no faster than any hillside.
+pub const WAVE_EROSION_BOOST: f32 = 6.0;
+
 /// Effective hillslope diffusivity at the reference cell pitch, m^2/yr.
 pub const HILLSLOPE_D_M2_YR: f32 = 60.0;
 /// Cell pitch [`HILLSLOPE_D_M2_YR`] is quoted at (level 6), metres.
@@ -61,7 +70,10 @@ pub fn weather(planet: &mut Planet, ctx: &mut Ctx<'_>, rate_scratch: &mut Vec<f3
             let t = planet.temperature_c[i] / FREEZE_THAW_WIDTH_C;
             let freeze_thaw = 1.0 + (-(t * t)).exp();
             let shield = (-planet.sediment_m[i] / SOIL_SHIELD_DEPTH_M).exp();
-            WEATHERING_M_PER_YR * moisture * freeze_thaw * shield * dt_yr
+            let surf = 1.0
+                + WAVE_EROSION_BOOST
+                    * (1.0 - (planet.elevation_m[i] - sea) / WAVE_ATTACK_M).clamp(0.0, 1.0);
+            WEATHERING_M_PER_YR * moisture * freeze_thaw * shield * surf * dt_yr
         })
         .collect_into_vec(rate_scratch);
 

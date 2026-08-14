@@ -1013,8 +1013,25 @@ fn split_plate(
                 && (planet.plate_id[m as usize] == new_id || mine == new_id)
             {
                 planet.tectonic_flags[c as usize] |= cell_flags::RIFT;
+                // Graded margin thinning: the rift cell itself thins hardest,
+                // its neighbours progressively less. A flat single-ring 0.9
+                // dropped exactly the path cells ~900 m while their
+                // neighbours kept full height — rifted coastlines came out
+                // as alternating submerged/emergent cell stripes hovering at
+                // the waterline instead of a coherent shelf.
                 let th = &mut planet.crust_thickness_m[c as usize];
-                *th = (*th * 0.9).max(1_000.0);
+                *th = (*th * 0.90).max(1_000.0);
+                // Ring taper on CONTINENTAL neighbours only: thinning
+                // oceanic crust near every split boundary destabilised the
+                // whole mosaic (weakness follows thin crust).
+                for &m2 in mesh.neighbors_of(c) {
+                    if planet.crust_type[m2 as usize] == CrustType::Continental
+                        && planet.plate_id[m2 as usize] == mine
+                    {
+                        let th2 = &mut planet.crust_thickness_m[m2 as usize];
+                        *th2 = (*th2 * 0.97).max(1_000.0);
+                    }
+                }
                 break;
             }
         }
