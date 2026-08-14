@@ -477,6 +477,58 @@ pub fn shading(
         }
         ring = next;
     }
+    // THE key step: without smoothing, the ring levels are a per-cell
+    // STAIRCASE and every terrace boundary renders as a cell-polygon line —
+    // corner blending only softens the rims. A few Jacobi passes make the
+    // per-cell values themselves continuous, so no big cell-to-cell jump
+    // exists anywhere for the interpolation to expose. Land stays clamped
+    // at 1.0 to anchor the shoreline.
+    let mut scratch_field = coast.clone();
+    for _ in 0..3 {
+        for i in 0..n {
+            if !is_water(i) {
+                continue;
+            }
+            let nb = mesh.neighbors_of(i as u32);
+            let mut sum = coast[i];
+            for &m in nb {
+                sum += coast[m as usize];
+            }
+            scratch_field[i] = sum / (nb.len() as f32 + 1.0);
+        }
+        std::mem::swap(&mut coast, &mut scratch_field);
+    }
+
+    // Depth gets the same treatment: shelf-to-abyss steps between adjacent
+    // cells were the other source of hard polygon boundaries in the water.
+    let mut depth: Vec<f32> = (0..n)
+        .map(|i| {
+            if is_water(i) {
+                ocean_depth_t(sea_level_m - elev_m[i])
+            } else {
+                0.0
+            }
+        })
+        .collect();
+    let mut scratch_field = depth.clone();
+    for _ in 0..2 {
+        for i in 0..n {
+            if !is_water(i) {
+                continue;
+            }
+            let nb = mesh.neighbors_of(i as u32);
+            let mut sum = depth[i];
+            let mut cnt = 1.0f32;
+            for &m in nb {
+                if is_water(m as usize) {
+                    sum += depth[m as usize];
+                    cnt += 1.0;
+                }
+            }
+            scratch_field[i] = sum / cnt;
+        }
+        std::mem::swap(&mut depth, &mut scratch_field);
+    }
 
     let shade = (0..n)
         .into_par_iter()
@@ -503,7 +555,7 @@ pub fn shading(
                 grad_north,
                 kind,
                 depth_t: if kind == SurfaceKind::Ocean {
-                    ocean_depth_t(sea_level_m - elev)
+                    depth[i]
                 } else {
                     0.0
                 },
