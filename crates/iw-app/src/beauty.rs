@@ -448,7 +448,15 @@ pub fn shading(
     // first ring's cell edges. Land is 1.0 (blends smoothly across the
     // shoreline); water ring k of COAST_RINGS fades linearly to 0.
     const COAST_RINGS: u32 = 3;
-    let is_water = |i: usize| elev_m[i] < sea_level_m;
+    // MUST match the shader-side water classification (surface_kind): a
+    // sea-level lagoon renders as ocean, and classifying it as land here
+    // stamped coast=1/depth=0 across whole lagoon clusters — a maximally
+    // shallow pale sheet with the cluster's polygon outline.
+    let is_water = |i: usize| {
+        let lake = lake_depth_m.get(i).copied().unwrap_or(0.0);
+        elev_m[i] < sea_level_m
+            || (lake >= LAKE_MIN_M && elev_m[i] + lake - sea_level_m < LAGOON_MAX_ABOVE_SEA_M)
+    };
     let mut coast = vec![0.0f32; n];
     let mut ring: Vec<u32> = Vec::new();
     for i in 0..n {
@@ -504,7 +512,10 @@ pub fn shading(
     let mut depth: Vec<f32> = (0..n)
         .map(|i| {
             if is_water(i) {
-                ocean_depth_t(sea_level_m - elev_m[i])
+                // Lagoons are shallow by their own filled depth, not by a
+                // (negative) height below sea.
+                let lake = lake_depth_m.get(i).copied().unwrap_or(0.0);
+                ocean_depth_t((sea_level_m - elev_m[i]).max(lake * 0.5))
             } else {
                 0.0
             }
