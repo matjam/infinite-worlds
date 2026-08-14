@@ -147,24 +147,32 @@ fn emit_strip(
     ramp: &dyn Fn(f32) -> f32,
     verts: &mut Vec<RiverVertex>,
 ) {
-    let pts: Vec<Vec3> = path.iter().map(|&c| mesh.centers[c]).collect();
-    // Per-node display elevation (mouths clamp to the waterline) and ramp.
-    // Water-surface elevation: mouths meet the sea at the waterline, and a
-    // final lake cell meets the LAKE surface (bed + depth) instead of diving
-    // under it.
-    let node_elev: Vec<f32> = path
-        .iter()
-        .map(|&c| {
-            (cells.elevation_m[c] + cells.lake_depth_m.get(c).copied().unwrap_or(0.0))
-                .max(sea_level_m)
-        })
-        .collect();
-    let node_t: Vec<f32> = path
-        .iter()
-        .map(|&c| ramp(cells.water_flux_m3_yr[c]))
-        .collect();
+    // Consecutive duplicates give the spline zero-length tangents (NaN after
+    // normalisation) — a cycle in corrupt drainage data can repeat a cell.
+    // Nodes are filtered TOGETHER with their attributes so the spline and
+    // the per-node blends stay in lockstep.
+    let mut pts: Vec<Vec3> = Vec::with_capacity(path.len());
+    let mut node_elev: Vec<f32> = Vec::with_capacity(path.len());
+    let mut node_t: Vec<f32> = Vec::with_capacity(path.len());
+    for &c in path {
+        let p = mesh.centers[c];
+        if pts.last().is_none_or(|l| (*l - p).length_squared() > 1e-12) {
+            pts.push(p);
+            // Water-surface elevation: mouths meet the sea at the waterline,
+            // and a final lake cell meets the LAKE surface (bed + depth)
+            // instead of diving under it.
+            node_elev.push(
+                (cells.elevation_m[c] + cells.lake_depth_m.get(c).copied().unwrap_or(0.0))
+                    .max(sea_level_m),
+            );
+            node_t.push(ramp(cells.water_flux_m3_yr[c]));
+        }
+    }
+    if pts.len() < 2 {
+        return;
+    }
 
-    let steps = (path.len() - 1) * SUBDIV;
+    let steps = (pts.len() - 1) * SUBDIV;
     let mut prev_pair: Option<(RiverVertex, RiverVertex)> = None;
     let mut prev_p: Option<Vec3> = None;
     // No emitted triangle may span more than about a cell: whatever upstream
@@ -173,15 +181,25 @@ fn emit_strip(
     let max_step = (4.0 * std::f32::consts::PI / mesh.n_cells() as f32).sqrt() * 1.5;
     for s in 0..=steps {
         let t = s as f32 / SUBDIV as f32;
-        let p = spline_point(&pts, t).normalize();
-        if let Some(pp) = prev_p {
-            if (p - pp).length() > max_step {
-                prev_pair = None; // restart the strip across the gap
-            }
+        let p = spline_point(&pts, t).normalize_or_zero();
+        // Inverted guard on purpose: a NaN from a degenerate spline compares
+        // FALSE to everything, so `dist > max_step` let garbage through.
+        // Only a provably-finite, provably-short step may continue a strip.
+        let ok = p.is_finite()
+            && p != Vec3::ZERO
+            && prev_p.is_none_or(|pp| (p - pp).length() <= max_step);
+        if !ok {
+            prev_pair = None;
+            prev_p = if p.is_finite() && p != Vec3::ZERO {
+                Some(p)
+            } else {
+                None
+            };
+            continue;
         }
         prev_p = Some(p);
         // Forward direction along the curve, projected to the tangent plane.
-        let ahead = spline_point(&pts, (t + 0.25).min((path.len() - 1) as f32));
+        let ahead = spline_point(&pts, (t + 0.25).min((pts.len() - 1) as f32));
         let behind = spline_point(&pts, (t - 0.25).max(0.0));
         let fwd = {
             let d = ahead - behind;
@@ -195,7 +213,7 @@ fn emit_strip(
         }
         let side = p.cross(fwd).normalize_or_zero();
         // Linear blend of the node attributes.
-        let (i0, frac) = ((t.floor() as usize).min(path.len() - 2), t.fract());
+        let (i0, frac) = ((t.floor() as usize).min(pts.len() - 2), t.fract());
         let tt = node_t[i0] * (1.0 - frac) + node_t[i0 + 1] * frac;
         let elev = node_elev[i0] * (1.0 - frac) + node_elev[i0 + 1] * frac;
         let half_w = MIN_HALF_WIDTH_KM + (MAX_HALF_WIDTH_KM - MIN_HALF_WIDTH_KM) * tt;
