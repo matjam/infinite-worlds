@@ -106,13 +106,21 @@ void main() {
             : v_landlake.x - 0.5 + shore_noise(S, freq) * SHORE_NOISE_AMP;
         if (crinkled < 0.0 && (!water || lake_frag)) {
             // Water side of the line. Lakes ramp from shore tone to their
-            // deep tone; the sea shelves toward the open-ocean tone.
-            float deep = smoothstep(0.05, 0.45, -crinkled);
+            // deep tone. The SEA side uses the same ocean ramp as the true
+            // ocean fragments, with the crinkle only pulling the depth to
+            // zero at the waterline: `v_depth` is continuous across the cell
+            // edge, so the drowned band meets the neighbouring ocean cells
+            // seamlessly instead of snapping from its own gradient to
+            // theirs at the polygon boundary.
+            // Reaches 1.0 by -crinkled ~ 0.15: boundary corners sit near
+            // 0.17, so the band converges to the plain ocean ramp BEFORE
+            // the polygon edge — that is what makes the seam vanish.
+            float deep = smoothstep(0.02, 0.15, -crinkled);
             albedo = lakeside ? mix(LAKE_NEAR_ALBEDO, LAKE_DEEP_ALBEDO, deep)
-                              : mix(SHELF_ALBEDO, OCEAN_MID_ALBEDO, deep);
+                              : ocean_ramp(v_depth * deep);
             kind = lakeside ? 2.0 : 1.0;
             water = true;
-            depth_t = 0.0;
+            depth_t = v_depth * deep;
         } else if (water && crinkled > 0.0) {
             // Emergent fringe on the water side: it is LAND, so it shows the
             // neighbouring land cells' own vegetation/soil albedo — painting
