@@ -76,6 +76,10 @@ pub struct CellShade {
     pub depth_t: f32,
     /// Ice cover fraction, 0..1. Kills the glint and the water sky term.
     pub ice_t: f32,
+    /// Coast proximity, 1 at the shoreline fading to 0 a few water rings
+    /// out — a SMOOTH multi-cell field so the coastal-shallows fringe ends
+    /// on a gradient, not on a cell edge.
+    pub coast_t: f32,
 }
 
 /// Per-cell dynamic data, std430-compatible (16 byte stride).
@@ -705,7 +709,7 @@ impl GlobeRenderer {
                     let s = s[i];
                     dst.gradient = pack_half2(s.grad_east, s.grad_north);
                     dst.material =
-                        pack_unorm4(s.kind as u8 as f32 / 255.0, s.depth_t, s.ice_t, 0.0);
+                        pack_unorm4(s.kind as u8 as f32 / 255.0, s.depth_t, s.ice_t, s.coast_t);
                 }
                 None => {
                     dst.gradient = 0;

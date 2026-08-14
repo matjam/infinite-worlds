@@ -443,6 +443,41 @@ pub fn shading(
             }
         })
         .collect();
+    // Coast proximity: BFS rings over water cells out from every shore, so
+    // the shallows fringe fades over several cells instead of ending on the
+    // first ring's cell edges. Land is 1.0 (blends smoothly across the
+    // shoreline); water ring k of COAST_RINGS fades linearly to 0.
+    const COAST_RINGS: u32 = 3;
+    let is_water = |i: usize| elev_m[i] < sea_level_m;
+    let mut coast = vec![0.0f32; n];
+    let mut ring: Vec<u32> = Vec::new();
+    for i in 0..n {
+        if !is_water(i) {
+            coast[i] = 1.0;
+        } else if mesh
+            .neighbors_of(i as u32)
+            .iter()
+            .any(|&m| !is_water(m as usize))
+        {
+            coast[i] = (COAST_RINGS as f32) / (COAST_RINGS + 1) as f32;
+            ring.push(i as u32);
+        }
+    }
+    for k in (1..COAST_RINGS).rev() {
+        let level = k as f32 / (COAST_RINGS + 1) as f32;
+        let mut next: Vec<u32> = Vec::new();
+        for &c in &ring {
+            for &m in mesh.neighbors_of(c) {
+                let mi = m as usize;
+                if is_water(mi) && coast[mi] == 0.0 {
+                    coast[mi] = level;
+                    next.push(m);
+                }
+            }
+        }
+        ring = next;
+    }
+
     let shade = (0..n)
         .into_par_iter()
         .map(|i| {
@@ -473,6 +508,7 @@ pub fn shading(
                     0.0
                 },
                 ice_t: (cell.ice_m / ICE_FULL_M).clamp(0.0, 1.0),
+                coast_t: coast[i],
             }
         })
         .collect();

@@ -24,6 +24,7 @@ layout(location = 4) flat in vec4 v_mat;
 layout(location = 5) in vec2 v_landlake;
 layout(location = 6) in float v_depth;
 layout(location = 7) in vec3 v_land_color;
+layout(location = 8) in float v_coast;
 
 layout(location = 0) out vec4 o_color;
 
@@ -86,7 +87,10 @@ void main() {
     // effective depth toward zero near any shore. Raw per-cell bathymetry
     // alone gave some bays a pale shelf patch that clipped at the cell edge
     // and other bays nothing at all.
-    float coast_prox = clamp(v_landlake.x * 2.5, 0.0, 1.0);
+    // Smooth multi-ring coast field (CPU BFS, corner-blended): the landness
+    // version was zero beyond the first water ring, so the fringe ended on a
+    // cell edge.
+    float coast_prox = smoothstep(0.05, 0.9, v_coast);
     float eff_depth = depth_soft * (1.0 - coast_prox * 0.85);
     if (water && !lake_frag) {
         vec3 ramp = ocean_ramp(eff_depth);
