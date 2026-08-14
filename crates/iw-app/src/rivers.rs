@@ -83,9 +83,20 @@ pub fn build(mesh: &Mesh, cells: &ViewCells, sea_level_m: f32) -> Vec<RiverVerte
         let mut path: Vec<usize> = vec![start];
         claimed[start] = true;
         let mut cur = start;
+        // Sanity bound: consecutive path cells are mesh neighbours, so their
+        // chord can never exceed a few cell pitches. Anything longer is
+        // corrupt drainage data, and one bad hop drew a strip beelining
+        // across an ocean.
+        let max_chord2 = {
+            let pitch = (4.0 * std::f32::consts::PI / n as f32).sqrt() * 3.0;
+            pitch * pitch
+        };
         loop {
             let next = cells.flow_to[cur] as usize;
             if next >= n {
+                break;
+            }
+            if (mesh.centers[next] - mesh.centers[cur]).length_squared() > max_chord2 {
                 break;
             }
             path.push(next);

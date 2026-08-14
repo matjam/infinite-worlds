@@ -22,6 +22,7 @@ layout(location = 4) flat in vec4 v_mat;
 // x = land fraction (its 0.5 contour is the sub-cell shoreline),
 // y = lake fraction (colours the water a drowned fragment turns into).
 layout(location = 5) in vec2 v_landlake;
+layout(location = 6) in float v_depth;
 
 layout(location = 0) out vec4 o_color;
 
@@ -52,7 +53,9 @@ void main() {
     vec3 N = normalize(v_normal);
     vec3 S = normalize(v_sphere);
     float kind = v_mat.x;
-    float depth_t = v_mat.y;
+    // Blended across water corners, not the flat per-cell value: shallow
+    // shelf cells otherwise step hard against their deep neighbours.
+    float depth_t = v_depth;
     float ice_t = v_mat.z;
     bool water = kind > 0.5;
 

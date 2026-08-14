@@ -59,6 +59,10 @@ layout(push_constant) uniform Push {
 // fragment stage to perturb (see the crinkle block in globe.frag); the lake
 // fraction colours the water that drowned land fragments turn into.
 layout(location = 5) out vec2 v_landlake;
+// Corner-blended ocean-depth ramp (water cells only contribute): the flat
+// per-cell depth stamped shallow shelf cells as hard pale plates against
+// their deep neighbours.
+layout(location = 6) out float v_depth;
 
 layout(location = 0) out vec3 v_normal;
 // Not flat: in the beauty view a corner averages the albedo of the cells that
@@ -101,6 +105,12 @@ void main() {
         float ka = kind_of(cd.material);
         float kb = kind_of(cy.material);
         float kc = kind_of(cz.material);
+        float dsum = 0.0;
+        float dn = 0.0;
+        if (ka > 0.5) { dsum += unpackUnorm4x8(cd.material).y; dn += 1.0; }
+        if (kb > 0.5) { dsum += unpackUnorm4x8(cy.material).y; dn += 1.0; }
+        if (kc > 0.5) { dsum += unpackUnorm4x8(cz.material).y; dn += 1.0; }
+        v_depth = dn > 0.0 ? dsum / dn : 0.0;
         v_landlake = vec2((ka < 0.5 ? 1.0 : 0.0) + (kb < 0.5 ? 1.0 : 0.0)
                               + (kc < 0.5 ? 1.0 : 0.0),
                           (ka > 1.5 ? 1.0 : 0.0) + (kb > 1.5 ? 1.0 : 0.0)
