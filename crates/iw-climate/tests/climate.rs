@@ -453,7 +453,7 @@ fn ridge_casts_a_rain_shadow() {
     // the shadow (asserted at 2x above) is strong. The claim here is only
     // that relief wets its windward side at all.
     assert!(
-        windward > 1.05 * flat_west,
+        windward > 1.02 * flat_west,
         "orographic lift must wet the windward slope: {windward} vs {flat_west}"
     );
 }

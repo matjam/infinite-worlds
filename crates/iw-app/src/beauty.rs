@@ -39,6 +39,8 @@ pub const LAKE_SHALLOW_RGB: [u8; 3] = [0x46, 0x92, 0xb4];
 pub const LAKE_DEEP_RGB: [u8; 3] = [0x1b, 0x53, 0x92];
 /// Lake depth (m) below which a cell is not treated as water at all.
 pub const LAKE_MIN_M: f32 = 1.0;
+/// Lake surfaces closer than this to sea level render as SEA (lagoons).
+pub const LAGOON_MAX_ABOVE_SEA_M: f32 = 30.0;
 
 // --- ice -------------------------------------------------------------------
 
@@ -324,9 +326,9 @@ pub fn beauty_color(cell: &BeautyCell) -> [u8; 4] {
         return rgba(scale_luminance(ice, 1.0 + DETAIL_WATER_GAIN * cell.detail));
     }
     let rel = cell.elev_m - cell.sea_level_m;
-    if rel < 0.0 {
+    if rel < 0.0 || is_lagoon(cell) {
         return rgba(scale_luminance(
-            ocean_color(-rel),
+            ocean_color((-rel).max(cell.lake_depth_m * 0.5)),
             1.0 + DETAIL_WATER_GAIN * cell.detail,
         ));
     }
@@ -337,11 +339,20 @@ pub fn beauty_color(cell: &BeautyCell) -> [u8; 4] {
     rgba(land_color(cell))
 }
 
+/// A "lake" whose surface sits within a stone's throw of sea level is a
+/// coastal lagoon: the hydrology tags shallow shoreline basins as lakes, and
+/// rendering them with the lake palette and a polygon outline stamped hard
+/// pale plates all over otherwise organic coastlines. Treat them as sea.
+pub fn is_lagoon(cell: &BeautyCell) -> bool {
+    cell.lake_depth_m >= LAKE_MIN_M
+        && cell.elev_m + cell.lake_depth_m - cell.sea_level_m < LAGOON_MAX_ABOVE_SEA_M
+}
+
 // --- shading ---------------------------------------------------------------
 
 /// What the shader treats this cell as.
 pub fn surface_kind(cell: &BeautyCell) -> SurfaceKind {
-    if cell.elev_m < cell.sea_level_m {
+    if cell.elev_m < cell.sea_level_m || is_lagoon(cell) {
         SurfaceKind::Ocean
     } else if cell.lake_depth_m >= LAKE_MIN_M {
         SurfaceKind::Lake
@@ -423,9 +434,11 @@ pub fn shading(
         .into_par_iter()
         .map(|i| {
             let lake = lake_depth_m.get(i).copied().unwrap_or(0.0);
-            if lake > 0.0 {
-                elev_m[i] + lake
+            let surface = elev_m[i] + lake;
+            if lake > 0.0 && surface - sea_level_m >= LAGOON_MAX_ABOVE_SEA_M {
+                surface
             } else {
+                // Land, sea, and sea-level lagoons all use the sea clamp.
                 display_elevation(elev_m[i], sea_level_m)
             }
         })

@@ -35,9 +35,9 @@ const BASE_RAINOUT: f32 = 0.07;
 /// dead advection operator): at 1.0/1.0 a 28%-land world kept only a third
 /// of the rain share Earth's land gets and two thirds of the land read
 /// desert. 1.3/0.9 steers share without re-strangling the inland fetch.
-const LAND_RAINOUT_BIAS: f32 = 1.3;
+const LAND_RAINOUT_BIAS: f32 = 1.45;
 /// Rainout multiplier over open water: maritime air holds on to its moisture.
-const OCEAN_RAINOUT_BIAS: f32 = 0.9;
+const OCEAN_RAINOUT_BIAS: f32 = 0.85;
 /// ITCZ convergence bonus at the equator.
 const ITCZ_GAIN: f32 = 0.30;
 /// Gaussian width of the ITCZ, degrees.

@@ -155,6 +155,11 @@ pub struct TectonicsProcess {
     /// budget, so counts collide across distinct meshes).
     cache: Option<(u64, MeshCache)>,
     genesis: Option<craton::Genesis>,
+    /// Per-cell genesis membership `(mass, radial f)`, cached per mesh
+    /// fingerprint: the crustal-formation era stamps continent progressively
+    /// (cores first), so it needs this every step, and the fBm behind it is
+    /// too expensive to recompute 200 times.
+    genesis_members: Option<(u64, Vec<Option<(u16, f32)>>)>,
     scratch: Scratch,
 }
 
@@ -170,6 +175,7 @@ impl TectonicsProcess {
         TectonicsProcess {
             cache: None,
             genesis: None,
+            genesis_members: None,
             scratch: Scratch::default(),
         }
     }
@@ -286,7 +292,26 @@ impl Process for TectonicsProcess {
                     self.genesis = Some(craton::Genesis::new(seed, count, cache.pitch_m));
                 }
                 let genesis = self.genesis.as_ref().expect("genesis just built");
-                phase1::step(planet, mesh, dt_myr, ctx, cache, genesis, &mut self.scratch)
+                if self.genesis_members.as_ref().is_none_or(|(f, _)| *f != fp) {
+                    use rayon::prelude::*;
+                    let members = mesh
+                        .centers
+                        .par_iter()
+                        .map(|d| genesis.membership(*d))
+                        .collect();
+                    self.genesis_members = Some((fp, members));
+                }
+                let members = &self.genesis_members.as_ref().expect("members built").1;
+                phase1::step(
+                    planet,
+                    mesh,
+                    dt_myr,
+                    ctx,
+                    cache,
+                    genesis,
+                    members,
+                    &mut self.scratch,
+                )
             }
             Phase::Drift | Phase::Refinement | Phase::RecentPast => {
                 drift::step(planet, mesh, dt_myr, ctx, cache, &mut self.scratch)

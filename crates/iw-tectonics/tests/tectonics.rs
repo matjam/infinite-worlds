@@ -18,7 +18,9 @@ use iw_tectonics::{craton_min_separation_m, TectonicsProcess};
 fn cratons_are_seeded_spaced_and_thick() {
     let mut h = Harness::level(5);
     let mut p = TectonicsProcess::new();
-    h.run(&mut p, Phase::CrustalFormation, 1);
+    // The continent now ACCRETES over the era (cores first), so the full
+    // outline and thickness band only exist at the end of the phase.
+    h.run_crustal_formation(&mut p);
 
     // Pangaea-first: one plate per landmass (supercontinent + 0-2 micros),
     // and the supercontinent must dominate.

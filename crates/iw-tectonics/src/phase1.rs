@@ -76,6 +76,12 @@ pub fn craton_min_separation_m(seed: u64, count: u32) -> f64 {
 /// One CrustalFormation step. The landmasses are static (bar a slow wobble the
 /// hand-off inherits); the era's work — outline, cores, thickness texture — is
 /// stamped once at seeding, and the ocean ages underneath.
+/// Fraction of the crustal-formation era over which the supercontinent
+/// assembles (shield cores first, platforms accreting outward to the fractal
+/// rim). The remainder of the era is quiet differentiation and ocean aging.
+const ASSEMBLY_FRACTION: f64 = 0.7;
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn step(
     planet: &mut Planet,
     mesh: &Mesh,
@@ -83,35 +89,52 @@ pub(crate) fn step(
     ctx: &mut StepCtx,
     cache: &MeshCache,
     genesis: &Genesis,
+    members: &[Option<(u16, f32)>],
     scratch: &mut Scratch,
 ) {
     let _ = scratch;
     if planet.plates.is_empty() {
-        seed_supercontinent(planet, mesh, ctx, cache, genesis);
+        seed_proto_crust(planet, ctx, cache, genesis);
+    }
+    // Progressive assembly: a cell joins the continent once the era has
+    // advanced past its radial coordinate (0 at a shield core, 1 at the rim),
+    // so the landmass grows outward from its cores on screen instead of the
+    // whole map being stamped at step zero and nothing visibly happening for
+    // 200 Myr. Deterministic: purely a function of (time, membership).
+    let duration = planet
+        .config
+        .duration_myr(iw_core::Phase::CrustalFormation)
+        .max(1e-6);
+    let reveal = (planet.time_myr / (duration * ASSEMBLY_FRACTION)).min(1.0) as f32;
+    let mut grown = 0usize;
+    let mut total = 0usize;
+    for (c, member) in members.iter().enumerate() {
+        if let Some((mass, f)) = member {
+            total += 1;
+            if *f <= reveal && planet.crust_type[c] != CrustType::Continental {
+                let thickness = genesis.target_thickness_m(*mass, mesh.centers[c], *f);
+                make_continental(planet, c as u32, thickness, cache.area_m2[c], ctx.ledger);
+                planet.plate_id[c] = *mass;
+                grown += 1;
+            }
+        }
+    }
+    if grown > 0 && reveal >= 1.0 {
+        ctx.progress
+            .event(iw_core::ProgressEvent::Milestone(format!(
+                "the supercontinent is assembled: {:.0}% of the surface, {} landmass{}",
+                100.0 * total as f64 / planet.n_cells() as f64,
+                genesis.n_masses(),
+                if genesis.n_masses() == 1 { "" } else { "es" },
+            )));
     }
     age_ocean(planet, dt_myr);
 }
 
-/// Lay down the global basaltic proto-crust, stamp the supercontinent and any
-/// microcontinents, and give each landmass its (slow) plate motion.
-fn seed_supercontinent(
-    planet: &mut Planet,
-    mesh: &Mesh,
-    ctx: &mut StepCtx,
-    cache: &MeshCache,
-    genesis: &Genesis,
-) {
+/// Lay down the global basaltic proto-crust and the (slowly wobbling) plate
+/// per landmass; the continent itself accretes step by step in [`step`].
+fn seed_proto_crust(planet: &mut Planet, ctx: &mut StepCtx, cache: &MeshCache, genesis: &Genesis) {
     let n = planet.n_cells();
-
-    // Pure per-cell membership map, in parallel; all mutation stays serial so
-    // the mass ledger is bit-identical across thread counts.
-    let members: Vec<Option<(u16, f32)>> = mesh
-        .centers
-        .par_iter()
-        .map(|d| genesis.membership(*d))
-        .collect();
-
-    let mut continental_cells = 0usize;
     for c in 0..n as u32 {
         planet.plate_id[c as usize] = UNASSIGNED;
         make_fresh_oceanic(
@@ -121,14 +144,6 @@ fn seed_supercontinent(
             cache.area_m2[c as usize],
             ctx.ledger,
         );
-    }
-    for (c, member) in members.iter().enumerate() {
-        if let Some((mass, f)) = member {
-            let thickness = genesis.target_thickness_m(*mass, mesh.centers[c], *f);
-            make_continental(planet, c as u32, thickness, cache.area_m2[c], ctx.ledger);
-            planet.plate_id[c] = *mass;
-            continental_cells += 1;
-        }
     }
 
     // One plate per landmass, wobbling slowly until the hand-off.
@@ -153,15 +168,10 @@ fn seed_supercontinent(
 
     ctx.progress
         .event(iw_core::ProgressEvent::Milestone(format!(
-            "supercontinent formed: {:.0}% of the surface, {} landmass{}",
-            100.0 * continental_cells as f64 / n as f64,
+            "crustal accretion begins: {} landmass{} forming",
             genesis.n_masses(),
             if genesis.n_masses() == 1 { "" } else { "es" },
         )));
-    log::debug!(
-        "genesis: {} landmasses, {continental_cells} continental cells",
-        genesis.n_masses()
-    );
 }
 
 /// Advance oceanic crust age and its density (thermal subsidence channel).

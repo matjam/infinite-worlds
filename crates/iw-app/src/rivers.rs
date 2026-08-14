@@ -1,93 +1,183 @@
-//! River ribbon geometry for the renderer, built from the drainage graph
-//! (`flow_to` + `water_flux_m3_yr`). One quad per drainage edge, widths and
-//! opacity scaled by flux. Widths are exaggerated relative to real rivers —
-//! at marble distance a pixel is ~13 km, and the point is that the Amazon
-//! reads from orbit.
+//! River geometry for the renderer, built from the drainage graph
+//! (`flow_to` + `water_flux_m3_yr`).
+//!
+//! Rivers are drawn as SMOOTH TAPERED STRIPS: downstream chains of cells are
+//! walked into polylines, each polyline is Catmull-Rom smoothed through its
+//! cell centres, and a triangle strip is laid along the curve whose width and
+//! opacity grow with flux. Tributaries end by flowing INTO the cell of the
+//! river they join, so confluences connect instead of butting.
+//!
+//! The draw threshold is RELATIVE — the top slice of this planet's own flux
+//! distribution — not an absolute discharge. During a glacial epoch every
+//! river's flux halves; with an absolute cutoff the map's rivers "mostly
+//! disappeared" at the end of generation, when what a viewer wants is the
+//! biggest rivers of the world as it now is.
 
 use glam::Vec3;
 use iw_core::view::ViewCells;
 use iw_mesh::Mesh;
 use iw_render_vulkan::globe::RiverVertex;
 
-/// Flux below which a river is not drawn, m^3/yr (~160 m^3/s; anything
-/// smaller is sub-pixel noise at globe distance).
-///
-/// Calibration (seed 42 @160k): land flux p99 = 2.3e10, max = 2.1e11 — the
-/// fragmented continents top out at Mississippi-order rivers, not the
-/// Amazon, so the ramp is normalised to what these worlds actually produce.
-const MIN_FLUX_M3_YR: f32 = 5.0e9;
-/// Flux at which a ribbon reaches full width and opacity.
-const MAX_FLUX_M3_YR: f32 = 3.0e11;
-const MIN_HALF_WIDTH_KM: f32 = 2.5;
-const MAX_HALF_WIDTH_KM: f32 = 10.0;
+/// Fraction of positive-flux land cells drawn (by flux rank).
+const DRAW_TOP_FRACTION: f64 = 0.10;
+/// Absolute floor under the relative threshold: a bone-dry world should show
+/// few rivers, not its top 10% of trickles.
+const ABS_MIN_FLUX_M3_YR: f32 = 1.0e9;
+const MIN_HALF_WIDTH_KM: f32 = 2.0;
+const MAX_HALF_WIDTH_KM: f32 = 9.0;
+/// Curve samples per cell-to-cell hop.
+const SUBDIV: usize = 4;
 /// Slightly lighter than the ocean fill so rivers read against coastal water.
 const RIVER_RGB: [f32; 3] = [0.13, 0.33, 0.55];
 
-/// Build the ribbon vertex list. Empty when the view has no drainage data
+/// Build the strip vertex list. Empty when the view has no drainage data
 /// (early phases) — the renderer treats that as "no rivers".
 pub fn build(mesh: &Mesh, cells: &ViewCells, sea_level_m: f32) -> Vec<RiverVertex> {
     let n = mesh.n_cells();
     if cells.flow_to.len() != n || cells.water_flux_m3_yr.len() != n {
         return Vec::new();
     }
-    let ln_min = MIN_FLUX_M3_YR.ln();
-    let ln_max = MAX_FLUX_M3_YR.ln();
-    let mut verts = Vec::new();
+
+    // Relative flux threshold: the top DRAW_TOP_FRACTION of flowing land.
+    let mut fluxes: Vec<f32> = (0..n)
+        .filter(|&i| {
+            (cells.flow_to[i] as usize) < n
+                && cells.elevation_m[i] >= sea_level_m
+                && cells.water_flux_m3_yr[i] > 0.0
+        })
+        .map(|i| cells.water_flux_m3_yr[i])
+        .collect();
+    if fluxes.is_empty() {
+        return Vec::new();
+    }
+    fluxes.sort_unstable_by(f32::total_cmp);
+    let cut = ((fluxes.len() as f64) * (1.0 - DRAW_TOP_FRACTION)) as usize;
+    let min_flux = fluxes[cut.min(fluxes.len() - 1)].max(ABS_MIN_FLUX_M3_YR);
+    let max_flux = fluxes[fluxes.len() - 1].max(min_flux * 8.0);
+    let (ln_min, ln_max) = (min_flux.ln(), max_flux.ln());
+    let ramp = |f: f32| ((f.max(1.0).ln() - ln_min) / (ln_max - ln_min).max(1e-3)).clamp(0.0, 1.0);
+
+    let qualifies = |i: usize| {
+        (cells.flow_to[i] as usize) < n
+            && cells.elevation_m[i] >= sea_level_m
+            && cells.water_flux_m3_yr[i] >= min_flux
+    };
+
+    // Sources: qualifying cells no other qualifying cell drains into.
+    let mut has_upstream = vec![false; n];
     for i in 0..n {
-        let j = cells.flow_to[i];
-        if j as usize >= n {
-            continue;
+        if qualifies(i) {
+            has_upstream[cells.flow_to[i] as usize] = true;
         }
-        let flux = cells.water_flux_m3_yr[i];
-        if flux < MIN_FLUX_M3_YR {
-            continue;
-        }
-        // Source must be land (submarine "flow" is basin bookkeeping); the
-        // mouth may dip into the sea, clamped to the waterline so the ribbon
-        // meets the ocean surface instead of diving under it.
-        if cells.elevation_m[i] < sea_level_m {
-            continue;
-        }
-        let j = j as usize;
-        // Width and opacity are evaluated at BOTH ends from each end's own
-        // flux, so a segment tapers as the river grows and every segment
-        // meeting at a node shares that node's width — joints stop popping.
-        let ramp = |f: f32| ((f.max(1.0).ln() - ln_min) / (ln_max - ln_min)).clamp(0.0, 1.0);
-        let ta = ramp(flux);
-        let tb = ramp(cells.water_flux_m3_yr[j].max(flux));
-        let width = |t: f32| MIN_HALF_WIDTH_KM + (MAX_HALF_WIDTH_KM - MIN_HALF_WIDTH_KM) * t;
-        let shade = |t: f32| [RIVER_RGB[0], RIVER_RGB[1], RIVER_RGB[2], 0.45 + 0.45 * t];
+    }
 
-        let a: Vec3 = mesh.centers[i];
-        let b: Vec3 = mesh.centers[j];
-        let mid = (a + b).normalize_or_zero();
-        let chord = b - a;
-        let dir = (chord - mid * chord.dot(mid)).normalize_or_zero();
-        if dir == Vec3::ZERO || mid == Vec3::ZERO {
+    // Walk each chain downstream; a chain ends at the sea, at a cell already
+    // claimed by another chain (a confluence — include it so the strips
+    // join), or when the flux drops back under the threshold.
+    let mut claimed = vec![false; n];
+    let mut verts = Vec::new();
+    for start in 0..n {
+        if !qualifies(start) || has_upstream[start] || claimed[start] {
             continue;
         }
-        let side = mid.cross(dir).normalize_or_zero();
-        let off_a = side * (width(ta) / iw_mesh::EARTH_RADIUS_KM);
-        let off_b = side * (width(tb) / iw_mesh::EARTH_RADIUS_KM);
+        let mut path: Vec<usize> = vec![start];
+        claimed[start] = true;
+        let mut cur = start;
+        loop {
+            let next = cells.flow_to[cur] as usize;
+            if next >= n {
+                break;
+            }
+            path.push(next);
+            if claimed[next] || !qualifies(next) {
+                break; // confluence or mouth: keep the join point, stop.
+            }
+            claimed[next] = true;
+            cur = next;
+        }
+        if path.len() >= 2 {
+            emit_strip(&path, mesh, cells, sea_level_m, &ramp, &mut verts);
+        }
+    }
+    verts
+}
 
-        let ea = (cells.elevation_m[i] - sea_level_m).max(0.0) + sea_level_m;
-        let eb = cells.elevation_m[j].max(sea_level_m);
-        let corner = |p: Vec3, off: Vec3, elev: f32, color: [f32; 4]| RiverVertex {
+/// Catmull-Rom sample of a polyline of unit vectors at parameter `t` in
+/// `0..len-1` (chords are tiny, so blending in 3D and renormalising is fine).
+fn spline_point(pts: &[Vec3], t: f32) -> Vec3 {
+    let last = pts.len() - 1;
+    let seg = (t.floor() as usize).min(last - 1);
+    let u = t - seg as f32;
+    let p0 = pts[seg.saturating_sub(1)];
+    let p1 = pts[seg];
+    let p2 = pts[seg + 1];
+    let p3 = pts[(seg + 2).min(last)];
+    let u2 = u * u;
+    let u3 = u2 * u;
+    (p1 * 2.0
+        + (p2 - p0) * u
+        + (p0 * 2.0 - p1 * 5.0 + p2 * 4.0 - p3) * u2
+        + (p3 - p0 + (p1 - p2) * 3.0) * u3)
+        * 0.5
+}
+
+fn emit_strip(
+    path: &[usize],
+    mesh: &Mesh,
+    cells: &ViewCells,
+    sea_level_m: f32,
+    ramp: &dyn Fn(f32) -> f32,
+    verts: &mut Vec<RiverVertex>,
+) {
+    let pts: Vec<Vec3> = path.iter().map(|&c| mesh.centers[c]).collect();
+    // Per-node display elevation (mouths clamp to the waterline) and ramp.
+    let node_elev: Vec<f32> = path
+        .iter()
+        .map(|&c| cells.elevation_m[c].max(sea_level_m))
+        .collect();
+    let node_t: Vec<f32> = path
+        .iter()
+        .map(|&c| ramp(cells.water_flux_m3_yr[c]))
+        .collect();
+
+    let steps = (path.len() - 1) * SUBDIV;
+    let mut prev_pair: Option<(RiverVertex, RiverVertex)> = None;
+    for s in 0..=steps {
+        let t = s as f32 / SUBDIV as f32;
+        let p = spline_point(&pts, t).normalize();
+        // Forward direction along the curve, projected to the tangent plane.
+        let ahead = spline_point(&pts, (t + 0.25).min((path.len() - 1) as f32));
+        let behind = spline_point(&pts, (t - 0.25).max(0.0));
+        let fwd = {
+            let d = ahead - behind;
+            (d - p * d.dot(p)).normalize_or_zero()
+        };
+        if fwd == Vec3::ZERO {
+            continue;
+        }
+        let side = p.cross(fwd).normalize_or_zero();
+        // Linear blend of the node attributes.
+        let (i0, frac) = ((t.floor() as usize).min(path.len() - 2), t.fract());
+        let tt = node_t[i0] * (1.0 - frac) + node_t[i0 + 1] * frac;
+        let elev = node_elev[i0] * (1.0 - frac) + node_elev[i0 + 1] * frac;
+        let half_w = MIN_HALF_WIDTH_KM + (MAX_HALF_WIDTH_KM - MIN_HALF_WIDTH_KM) * tt;
+        let off = side * (half_w / iw_mesh::EARTH_RADIUS_KM);
+        let color = [RIVER_RGB[0], RIVER_RGB[1], RIVER_RGB[2], 0.5 + 0.4 * tt];
+        let l = RiverVertex {
+            pos: (p - off).normalize().to_array(),
+            elevation_m: elev,
+            color,
+        };
+        let r = RiverVertex {
             pos: (p + off).normalize().to_array(),
             elevation_m: elev,
             color,
         };
-        let (a1, a2) = (
-            corner(a, -off_a, ea, shade(ta)),
-            corner(a, off_a, ea, shade(ta)),
-        );
-        let (b1, b2) = (
-            corner(b, -off_b, eb, shade(tb)),
-            corner(b, off_b, eb, shade(tb)),
-        );
-        verts.extend_from_slice(&[a1, b1, a2, a2, b1, b2]);
+        if let Some((pl, pr)) = prev_pair {
+            verts.extend_from_slice(&[pl, r, pr, pl, l, r]);
+        }
+        prev_pair = Some((l, r));
     }
-    verts
 }
 
 #[cfg(test)]
@@ -99,8 +189,9 @@ mod tests {
     #[ignore]
     fn probe_river_geometry() {
         let dir = std::path::PathBuf::from(std::env::var("IW_PLANET_DIR").expect("IW_PLANET_DIR"));
+        let tag = std::env::var("IW_PHASE_TAG").unwrap_or_else(|_| "phase-recent_past".into());
         let store = iw_store_postcard::FileStore::new(dir).unwrap();
-        let planet = iw_core::CheckpointStore::load(&store, "phase-recent_past").unwrap();
+        let planet = iw_core::CheckpointStore::load(&store, &tag).unwrap();
         let mesh = iw_mesh::Mesh::build_from_generators(&planet.mesh_generators);
         let view = iw_core::PlanetView::capture(1, &planet, &mesh);
         let n = mesh.n_cells();

@@ -858,9 +858,11 @@ impl App {
     fn toggle_mode(&mut self) {
         self.camera.mode = match self.camera.mode {
             ViewMode::Globe => {
+                // Enter the map centred on the current longitude but at the
+                // equator and fully zoomed out: whole-world context first.
                 let ll = iw_mesh::latlon_of(self.camera.focus);
-                self.camera.mercator_center =
-                    Vec2::new(ll[1], iw_render_vulkan::mercator::mercator_y(ll[0]));
+                self.camera.mercator_center = Vec2::new(ll[1], 0.0);
+                self.camera.mercator_half_width = std::f32::consts::PI;
                 ViewMode::Mercator
             }
             ViewMode::Mercator => {
@@ -913,10 +915,13 @@ impl App {
                     self.camera.pan_look(Vec2::new(-dx * scale, dy * scale));
                 }
                 ViewMode::Mercator => {
+                    // Terrain follows the cursor: both axes move opposite the
+                    // view centre. (The y sign pairs with the projection's
+                    // Vulkan flip — dragging down slides the map down.)
                     let per_px =
                         self.camera.mercator_half_width * 2.0 / self.surface_size.0.max(1) as f32;
                     self.camera
-                        .mercator_pan(Vec2::new(-dx * per_px, dy * per_px));
+                        .mercator_pan(Vec2::new(-dx * per_px, -dy * per_px));
                 }
             }
         }
