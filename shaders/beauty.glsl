@@ -171,6 +171,14 @@ vec3 ocean_ramp(float depth_t) {
 /// Lake-shore water a drowned fragment turns into next to a lake (linear,
 /// matched to the lake shallow palette).
 const vec3 LAKE_NEAR_ALBEDO = vec3(0.06, 0.28, 0.45);
+/// Deep-lake tone (linear, matched to the lake palette's deep end).
+const vec3 LAKE_DEEP_ALBEDO = vec3(0.012, 0.09, 0.28);
+/// Lake-fraction contour the lake shoreline is drawn at: a single lake
+/// cell's corners sit at 1/3, one ring out at 0.
+const float LAKE_CONTOUR = 0.20;
+/// Noise amplitude for the lake shoreline, in lake-fraction units. Bounded
+/// well under LAKE_CONTOUR so lake-free land can never flip to water.
+const float LAKE_NOISE_AMP = 0.11;
 /// Sand an emergent water fragment turns into (linear).
 const vec3 SAND_ALBEDO = vec3(0.50, 0.40, 0.22);
 /// Surf line tint (linear).

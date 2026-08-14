@@ -82,7 +82,7 @@ void main() {
         float grain = clamp(lum / max(ref_lum, 1e-4), 0.8, 1.25);
         albedo = ramp * grain;
     }
-    if (ice_t < 0.5 && (!lake_frag || v_landlake.x < 0.55)) {
+    if (ice_t < 0.5) {
         float pitch = max(uintBitsToFloat(pc.flags.z), 1e-4);
         float freq = 5.5 / pitch;
         // Landness units per kilometre: the 0..1 landness blend spans about
@@ -91,17 +91,26 @@ void main() {
         float cell_km = max(pitch * 6371.0, 1.0);
         float sand_band = SAND_WIDTH_KM / cell_km;
         float foam_band = FOAM_WIDTH_KM / cell_km;
-        float crinkled = v_landlake.x - 0.5 + shore_noise(S, freq) * SHORE_NOISE_AMP;
-        if (!water && crinkled < 0.0) {
-            // The shore wandered over this land fragment: shallow water,
-            // coloured for whichever kind of water the neighbours hold. The
-            // sea side DEEPENS seaward toward the open-ocean tone, so the
-            // band shelves off into the neighbouring ocean cells instead of
-            // ending as a flat pale terrace at the polygon edge.
-            bool lakey = v_landlake.y > 0.2;
+        // Two shoreline fields, both land-positive. The SEA field contours
+        // interpolated landness at 0.5. LAKE shores need their own field: a
+        // small lake's landness never drops below ~2/3, so instead the LAKE
+        // fraction (1/3 at a single lake cell's corners, 0 one ring out) is
+        // contoured at ~0.2 — which wraps the lake sub-cell and lets its
+        // shoreline wander exactly like the sea's, instead of the lake
+        // rendering as a flat teal polygon.
+        // Sea fragments never take the lake field: an ocean cell that
+        // happens to touch a lake must keep its sea shoreline.
+        bool lakeside = lake_frag || (v_landlake.y > 0.05 && kind < 0.5);
+        float crinkled = lakeside
+            ? LAKE_CONTOUR - v_landlake.y + shore_noise(S, freq * 1.7) * LAKE_NOISE_AMP
+            : v_landlake.x - 0.5 + shore_noise(S, freq) * SHORE_NOISE_AMP;
+        if (crinkled < 0.0 && (!water || lake_frag)) {
+            // Water side of the line. Lakes ramp from shore tone to their
+            // deep tone; the sea shelves toward the open-ocean tone.
             float deep = smoothstep(0.05, 0.45, -crinkled);
-            albedo = lakey ? LAKE_NEAR_ALBEDO : mix(SHELF_ALBEDO, OCEAN_MID_ALBEDO, deep);
-            kind = lakey ? 2.0 : 1.0;
+            albedo = lakeside ? mix(LAKE_NEAR_ALBEDO, LAKE_DEEP_ALBEDO, deep)
+                              : mix(SHELF_ALBEDO, OCEAN_MID_ALBEDO, deep);
+            kind = lakeside ? 2.0 : 1.0;
             water = true;
             depth_t = 0.0;
         } else if (water && crinkled > 0.0) {
