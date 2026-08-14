@@ -81,12 +81,20 @@ void main() {
     // detail-modulated by the cell's baked colour so the water keeps its
     // grain. This replaces the flat per-cell ocean colour that stuck out as
     // pale angular plates wherever shallow cells clustered.
+    // Every coast shallows CONSISTENTLY: the landness field (smoothly
+    // interpolated, nonzero through the first water ring) pulls the
+    // effective depth toward zero near any shore. Raw per-cell bathymetry
+    // alone gave some bays a pale shelf patch that clipped at the cell edge
+    // and other bays nothing at all.
+    float coast_prox = clamp(v_landlake.x * 2.5, 0.0, 1.0);
+    float eff_depth = depth_soft * (1.0 - coast_prox * 0.85);
     if (water && !lake_frag) {
-        vec3 ramp = ocean_ramp(depth_soft);
+        vec3 ramp = ocean_ramp(eff_depth);
         float lum = dot(albedo, vec3(0.4, 0.7, 0.4));
         float ref_lum = dot(ramp, vec3(0.4, 0.7, 0.4));
         float grain = clamp(lum / max(ref_lum, 1e-4), 0.8, 1.25);
         albedo = ramp * grain;
+        depth_t = eff_depth;
     }
     if (ice_t < 0.5) {
         float pitch = max(uintBitsToFloat(pc.flags.z), 1e-4);
@@ -123,10 +131,10 @@ void main() {
             // the polygon edge — that is what makes the seam vanish.
             float deep = smoothstep(0.02, 0.15, -crinkled);
             albedo = lakeside ? mix(LAKE_NEAR_ALBEDO, LAKE_DEEP_ALBEDO, deep)
-                              : ocean_ramp(depth_soft * deep);
+                              : ocean_ramp(eff_depth * deep);
             kind = lakeside ? 2.0 : 1.0;
             water = true;
-            depth_t = depth_soft * deep;
+            depth_t = eff_depth * deep;
         } else if (water && crinkled > 0.0) {
             // Emergent fringe on the water side: it is LAND, so it shows the
             // neighbouring land cells' own vegetation/soil albedo — painting
