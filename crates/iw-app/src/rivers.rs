@@ -166,9 +166,20 @@ fn emit_strip(
 
     let steps = (path.len() - 1) * SUBDIV;
     let mut prev_pair: Option<(RiverVertex, RiverVertex)> = None;
+    let mut prev_p: Option<Vec3> = None;
+    // No emitted triangle may span more than about a cell: whatever upstream
+    // data or spline degeneracy produces a jump, a strip that fans across
+    // half an ocean must be structurally impossible.
+    let max_step = (4.0 * std::f32::consts::PI / mesh.n_cells() as f32).sqrt() * 1.5;
     for s in 0..=steps {
         let t = s as f32 / SUBDIV as f32;
         let p = spline_point(&pts, t).normalize();
+        if let Some(pp) = prev_p {
+            if (p - pp).length() > max_step {
+                prev_pair = None; // restart the strip across the gap
+            }
+        }
+        prev_p = Some(p);
         // Forward direction along the curve, projected to the tangent plane.
         let ahead = spline_point(&pts, (t + 0.25).min((path.len() - 1) as f32));
         let behind = spline_point(&pts, (t - 0.25).max(0.0));
@@ -177,6 +188,9 @@ fn emit_strip(
             (d - p * d.dot(p)).normalize_or_zero()
         };
         if fwd == Vec3::ZERO {
+            // A stale pair here would bridge to the next valid sample with a
+            // long garbage triangle.
+            prev_pair = None;
             continue;
         }
         let side = p.cross(fwd).normalize_or_zero();
