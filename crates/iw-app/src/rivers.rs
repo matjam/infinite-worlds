@@ -43,6 +43,7 @@ pub fn build(mesh: &Mesh, cells: &ViewCells, sea_level_m: f32) -> Vec<RiverVerte
         .filter(|&i| {
             (cells.flow_to[i] as usize) < n
                 && cells.elevation_m[i] >= sea_level_m
+                && cells.lake_depth_m.get(i).copied().unwrap_or(0.0) <= 0.0
                 && cells.water_flux_m3_yr[i] > 0.0
         })
         .map(|i| cells.water_flux_m3_yr[i])
@@ -57,9 +58,15 @@ pub fn build(mesh: &Mesh, cells: &ViewCells, sea_level_m: f32) -> Vec<RiverVerte
     let (ln_min, ln_max) = (min_flux.ln(), max_flux.ln());
     let ramp = |f: f32| ((f.max(1.0).ln() - ln_min) / (ln_max - ln_min).max(1e-3)).clamp(0.0, 1.0);
 
+    // Lakes are excluded: the drainage graph legitimately flows THROUGH a
+    // lake to its outlet, but the river is the lake there — drawing the
+    // chain drew wide ribbons arcing across every lake surface. Breaking at
+    // the lake shore makes the outlet cell a fresh source, so the river
+    // resumes below the lake by itself.
     let qualifies = |i: usize| {
         (cells.flow_to[i] as usize) < n
             && cells.elevation_m[i] >= sea_level_m
+            && cells.lake_depth_m.get(i).copied().unwrap_or(0.0) <= 0.0
             && cells.water_flux_m3_yr[i] >= min_flux
     };
 
@@ -142,9 +149,15 @@ fn emit_strip(
 ) {
     let pts: Vec<Vec3> = path.iter().map(|&c| mesh.centers[c]).collect();
     // Per-node display elevation (mouths clamp to the waterline) and ramp.
+    // Water-surface elevation: mouths meet the sea at the waterline, and a
+    // final lake cell meets the LAKE surface (bed + depth) instead of diving
+    // under it.
     let node_elev: Vec<f32> = path
         .iter()
-        .map(|&c| cells.elevation_m[c].max(sea_level_m))
+        .map(|&c| {
+            (cells.elevation_m[c] + cells.lake_depth_m.get(c).copied().unwrap_or(0.0))
+                .max(sea_level_m)
+        })
         .collect();
     let node_t: Vec<f32> = path
         .iter()

@@ -108,7 +108,7 @@ void main() {
         // happens to touch a lake must keep its sea shoreline.
         bool lakeside = lake_frag || (v_landlake.y > 0.05 && kind < 0.5);
         float crinkled = lakeside
-            ? LAKE_CONTOUR - v_landlake.y + shore_noise(S, freq * 1.7) * LAKE_NOISE_AMP
+            ? LAKE_CONTOUR - v_landlake.y + shore_noise(S, freq * 1.2) * LAKE_NOISE_AMP
             : v_landlake.x - 0.5 + shore_noise(S, freq) * SHORE_NOISE_AMP;
         if (crinkled < 0.0 && (!water || lake_frag)) {
             // Water side of the line. Lakes ramp from shore tone to their

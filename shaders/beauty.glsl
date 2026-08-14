@@ -178,7 +178,7 @@ const vec3 LAKE_DEEP_ALBEDO = vec3(0.012, 0.09, 0.28);
 const float LAKE_CONTOUR = 0.20;
 /// Noise amplitude for the lake shoreline, in lake-fraction units. Bounded
 /// well under LAKE_CONTOUR so lake-free land can never flip to water.
-const float LAKE_NOISE_AMP = 0.11;
+const float LAKE_NOISE_AMP = 0.08;
 /// Sand an emergent water fragment turns into (linear).
 const vec3 SAND_ALBEDO = vec3(0.50, 0.40, 0.22);
 /// Surf line tint (linear).
